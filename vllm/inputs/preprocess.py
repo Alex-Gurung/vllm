@@ -343,7 +343,7 @@ class InputPreprocessor:
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_token_ids = parsed_content["prompt_token_ids"]
         token_type_ids = parsed_content.get("token_type_ids")
-
+        prompt_token_document_ids = parsed_content.get("prompt_token_document_ids")
         inputs: Union[TokenInputs, MultiModalInputs]
         if multi_modal_data := parsed_content.get("multi_modal_data"):
             inputs = self._process_multimodal(
@@ -357,6 +357,7 @@ class InputPreprocessor:
             inputs = token_inputs(
                 prompt_token_ids=prompt_token_ids,
                 token_type_ids=token_type_ids,
+                prompt_token_document_ids=prompt_token_document_ids,
             )
 
         if cache_salt := parsed_content.get("cache_salt"):
@@ -401,6 +402,7 @@ class InputPreprocessor:
         return_mm_hashes: bool = False,
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_text = parsed_content["prompt"]
+        convert_tokens_to_document_ids = parsed_content.get("convert_tokens_to_document_ids")
 
         inputs: Union[TokenInputs, MultiModalInputs]
         if multi_modal_data := parsed_content.get("multi_modal_data"):
@@ -417,9 +419,13 @@ class InputPreprocessor:
                 lora_request=lora_request,
                 tokenization_kwargs=tokenization_kwargs,
             )
+            prompt_token_document_ids = None
+            if convert_tokens_to_document_ids:
+                prompt_token_document_ids = convert_tokens_to_document_ids(prompt_token_ids)
             inputs = token_inputs(
                 prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
+                prompt_token_document_ids=prompt_token_document_ids
             )
 
         if cache_salt := parsed_content.get("cache_salt"):

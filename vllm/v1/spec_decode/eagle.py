@@ -61,6 +61,9 @@ class EagleProposer:
         self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
                                      device=device)
+        self.token_document_ids = torch.zeros(self.max_num_tokens,
+                                              dtype=torch.int32,
+                                              device=device)
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=device)
@@ -87,6 +90,8 @@ class EagleProposer:
         target_slot_mapping: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
+        # [batch_size]
+        next_token_document_ids: torch.Tensor,
         # [batch_size + 1] starting with 0
         cu_num_tokens: torch.Tensor,
         # [batch_size, max_num_blocks_per_req]
@@ -106,10 +111,13 @@ class EagleProposer:
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
         self.input_ids[:num_tokens - 1] = target_token_ids[1:]
+
+        self.token_document_ids[:num_tokens - 1] = next_token_document_ids[1:]
+
         # Replace the last token with the next token.
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         self.input_ids[last_token_indices] = next_token_ids
-
+        self.token_document_ids[last_token_indices] = next_token_document_ids
         # FA requires seq_len to have dtype int32.
         seq_lens = (target_positions[last_token_indices] + 1).int()
 

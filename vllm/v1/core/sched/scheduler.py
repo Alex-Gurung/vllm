@@ -593,12 +593,14 @@ class Scheduler(SchedulerInterface):
         num_regular_tokens = num_scheduled_tokens - num_scheduled_spec_tokens
         new_token_ids = request.all_token_ids[
             num_computed_tokens:num_computed_tokens + num_regular_tokens]
-
+        new_token_document_ids = request.all_token_document_ids[
+            num_computed_tokens:num_computed_tokens + num_regular_tokens]
         req_data_queue = self._cached_reqs_data.get(request.request_id)
         if req_data_queue:
             req_data = req_data_queue.popleft()
             req_data.resumed_from_preemption = resumed_from_preemption
             req_data.new_token_ids = new_token_ids
+            req_data.new_token_document_ids = new_token_document_ids
             req_data.new_block_ids = new_block_ids
             req_data.num_computed_tokens = num_computed_tokens
         else:
@@ -607,7 +609,8 @@ class Scheduler(SchedulerInterface):
             req_data = CachedRequestData.from_request(request,
                                                       resumed_from_preemption,
                                                       new_token_ids,
-                                                      new_block_ids)
+                                                      new_block_ids,
+                                                      new_token_document_ids=new_token_document_ids)
         return req_data
 
     def _try_schedule_encoder_inputs(
@@ -699,6 +702,7 @@ class Scheduler(SchedulerInterface):
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
+        sampled_token_document_ids = model_runner_output.sampled_token_document_ids
         spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
@@ -721,7 +725,7 @@ class Scheduler(SchedulerInterface):
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
-
+            generated_token_document_ids = sampled_token_document_ids[req_index]
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
             if scheduled_spec_token_ids:
@@ -756,13 +760,15 @@ class Scheduler(SchedulerInterface):
             stopped = False
             new_logprobs = None
             new_token_ids = generated_token_ids
+            new_token_document_ids = generated_token_document_ids
             kv_transfer_params = None
 
             # Append generated tokens and check for stop. Note that if
             # a request is still being prefilled, we expect the model runner
             # to return empty token ids for the request.
             for num_new, output_token_id in enumerate(new_token_ids, 1):
-                request.append_output_token_ids(output_token_id)
+                output_token_document_id = new_token_document_ids[num_new - 1]
+                request.append_output_token_ids(output_token_id, token_document_ids=output_token_document_id)
 
                 # Check for stop and update request state.
                 # This must be called before we make the EngineCoreOutput.
@@ -805,6 +811,7 @@ class Scheduler(SchedulerInterface):
                     EngineCoreOutput(
                         request_id=req_id,
                         new_token_ids=new_token_ids,
+                        new_token_document_ids=new_token_document_ids,
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """A layer that samples the next tokens from the model's outputs."""
 import itertools
 from collections.abc import Iterator
@@ -114,6 +115,13 @@ class SamplerOutput(
     # 'broadcasted' to all other PP ranks for next step.
     sampled_token_ids_cpu: Optional[torch.Tensor] = None
 
+    # on-device tensor containing the document ids of the sampled tokens
+    sampled_token_document_ids: Optional[torch.Tensor] = None
+    # CPU tensor containing the document ids of the sampled tokens. Used during multi-step to
+    # return the document ids from last rank to AsyncLLMEngine to be
+    # 'broadcasted' to all other PP ranks for next step.
+    sampled_token_document_ids_cpu: Optional[torch.Tensor] = None
+
     # On-device tensor containing the sampled token embeddings (embeddings
     # corresponding to the sampled token ids). Used when prompt embeddings are
     # specified in lieu of prompt token ids or text.
@@ -159,10 +167,13 @@ class SamplerOutput(
                                     else self.sampled_token_probs.shape)
         sampled_token_ids_repr = ("None" if self.sampled_token_ids is None else
                                   self.sampled_token_ids.shape)
+        sampled_token_document_ids_repr = ("None" if self.sampled_token_document_ids is None else
+                                  self.sampled_token_document_ids.shape)
         return (
             f"SamplerOutput(outputs={self.outputs}, "
             f"sampled_token_probs={sampled_token_probs_repr}, "
             f"sampled_token_ids={sampled_token_ids_repr}, "
+            f"sampled_token_document_ids={sampled_token_document_ids_repr}, "
             f"spec_decode_worker_metrics={self.spec_decode_worker_metrics})")
 
 

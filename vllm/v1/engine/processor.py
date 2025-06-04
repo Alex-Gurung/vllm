@@ -213,6 +213,7 @@ class Processor:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
+        token_document_ids: Optional[list[int]] = None,
     ) -> tuple[Optional[str], EngineCoreRequest]:
 
         # TODO(woosuk): Support pooling models.
@@ -321,6 +322,7 @@ class Processor:
         return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=decoder_inputs["prompt_token_ids"],
+            prompt_token_document_ids=decoder_inputs["prompt_token_document_ids"],
             mm_inputs=sorted_mm_inputs,
             mm_hashes=sorted_mm_hashes,
             mm_placeholders=sorted_mm_positions,

@@ -25,11 +25,13 @@ class SamplingMetadata:
 
     no_penalties: bool
     prompt_token_ids: Optional[torch.Tensor]
+    prompt_token_document_ids: Optional[torch.Tensor]
     frequency_penalties: torch.Tensor
     presence_penalties: torch.Tensor
     repetition_penalties: torch.Tensor
 
     output_token_ids: list[list[int]]
+    output_token_document_ids: list[list[int]]
 
     # req_index -> (min_tokens, stop_token_ids)
     min_tokens: dict[int, tuple[int, set[int]]]

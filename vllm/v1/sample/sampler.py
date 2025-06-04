@@ -61,6 +61,8 @@ class Sampler(nn.Module):
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
+        # for now we fake the document for every sampled token to be 1
+        sampled_document_ids = torch.ones_like(sampled, dtype=torch.int32)
 
         # These are GPU tensors.
         sampler_output = SamplerOutput(
@@ -68,6 +70,7 @@ class Sampler(nn.Module):
             # [num_requests, 1], where each row represents one generated
             # token per request.
             sampled_token_ids=sampled.unsqueeze(-1),
+            sampled_token_document_ids=sampled_document_ids.unsqueeze(-1),
             logprobs_tensors=logprobs_tensors,
         )
         return sampler_output

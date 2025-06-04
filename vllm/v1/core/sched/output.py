@@ -23,6 +23,7 @@ class NewRequestData:
 
     req_id: str
     prompt_token_ids: list[int]
+    prompt_token_document_ids: Optional[list[int]]
     mm_inputs: list[MultiModalKwargs]
     mm_hashes: list[str]
     mm_positions: list[PlaceholderRange]
@@ -40,6 +41,7 @@ class NewRequestData:
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
+            prompt_token_document_ids=request.prompt_token_document_ids if hasattr(request, "prompt_token_document_ids") else None,
             mm_inputs=request.mm_inputs,
             mm_hashes=request.mm_hashes,
             mm_positions=request.mm_positions,
@@ -53,6 +55,7 @@ class NewRequestData:
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
                 f"prompt_token_ids={self.prompt_token_ids},"
+                f"prompt_token_document_ids={self.prompt_token_document_ids},"
                 f"mm_inputs={self.mm_inputs},"
                 f"mm_hashes={self.mm_hashes},"
                 f"mm_positions={self.mm_positions},"
@@ -67,6 +70,7 @@ class NewRequestData:
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
                 f"prompt_token_ids_len={len(self.prompt_token_ids)},"
+                f"prompt_token_document_ids_len={len(self.prompt_token_document_ids) if self.prompt_token_document_ids else None},"
                 f"mm_inputs={self.mm_inputs},"
                 f"mm_hashes={self.mm_hashes},"
                 f"mm_positions={self.mm_positions},"
@@ -86,6 +90,7 @@ class CachedRequestData:
     # request's block IDs instead of appending to the existing block IDs.
     resumed_from_preemption: bool
     new_token_ids: list[int]
+    new_token_document_ids: Optional[list[int]]
     new_block_ids: list[list[int]]
     num_computed_tokens: int
 
@@ -96,11 +101,13 @@ class CachedRequestData:
         resumed_from_preemption: bool,
         new_token_ids: list[int],
         new_block_ids: list[list[int]],
+        new_token_document_ids: Optional[list[int]],
     ) -> CachedRequestData:
         return cls(
             req_id=request.request_id,
             resumed_from_preemption=resumed_from_preemption,
             new_token_ids=new_token_ids,
+            new_token_document_ids=new_token_document_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=request.num_computed_tokens,
         )

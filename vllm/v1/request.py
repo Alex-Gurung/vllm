@@ -22,6 +22,7 @@ class Request:
         self,
         request_id: str,
         prompt_token_ids: list[int],
+        prompt_token_document_ids: Optional[list[int]],
         multi_modal_inputs: Optional[list[MultiModalKwargs]],
         multi_modal_hashes: Optional[list[str]],
         multi_modal_placeholders: Optional[list[PlaceholderRange]],
@@ -49,9 +50,12 @@ class Request:
         self.max_tokens = sampling_params.max_tokens
 
         self.prompt_token_ids = prompt_token_ids
+        self.prompt_token_document_ids = prompt_token_document_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: list[int] = []
+        self._output_token_document_ids: list[int] = []
         self._all_token_ids: list[int] = self.prompt_token_ids.copy()
+        self._all_token_document_ids: list[int] = self.prompt_token_document_ids.copy()
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: Optional[str] = cache_salt
@@ -78,6 +82,8 @@ class Request:
         # they should also be updated simultaneously.
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
+        self.output_token_document_ids = ConstantList(self._output_token_document_ids)
+        self.all_token_document_ids = ConstantList(self._all_token_document_ids)
 
         # State
         # The number of tokens with prefix cache hits.
@@ -94,6 +100,7 @@ class Request:
             request_id=request.request_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
+            prompt_token_document_ids=request.prompt_token_document_ids,
             multi_modal_inputs=request.mm_inputs,
             multi_modal_hashes=request.mm_hashes,
             multi_modal_placeholders=request.mm_placeholders,
@@ -108,13 +115,20 @@ class Request:
     def append_output_token_ids(
         self,
         token_ids: Union[int, list[int]],
+        token_document_ids: Optional[Union[int, list[int]]] = None,
     ) -> None:
         if isinstance(token_ids, int):
             self._output_token_ids.append(token_ids)
             self._all_token_ids.append(token_ids)
+            if token_document_ids is not None:
+                self._output_token_document_ids.append(token_document_ids)
+                self._all_token_document_ids.append(token_document_ids)
         else:
             self._output_token_ids.extend(token_ids)
             self._all_token_ids.extend(token_ids)
+            if token_document_ids is not None:
+                self._output_token_document_ids.extend(token_document_ids)
+                self._all_token_document_ids.extend(token_document_ids)
 
     @property
     def num_tokens(self) -> int:

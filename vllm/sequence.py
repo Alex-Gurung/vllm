@@ -139,6 +139,8 @@ class SequenceDataDelta(
     """Delta SequenceData to send to workers per step."""
     # A new token to be appended to existing SequenceData.
     new_output_token_ids: list[int]
+    # A new token document ID to be appended to existing SequenceData.
+    new_output_token_document_ids: list[int]
     # Overwriting existing `cumulative_logprob`
     new_cumulative_logprob: float
     # Overwriting existing `num_computed_tokens`.
@@ -155,16 +157,24 @@ class SequenceData(msgspec.Struct,
         prompt_token_ids: The token IDs of the prompt.
         output_token_ids: The token IDs of the output. Set to an empty list if
             None.
+        prompt_token_document_ids: The document IDs of the prompt.
+        output_token_document_ids: The document IDs of the output.
 
     Attributes:
         prompt_token_ids: The token IDs of the prompt.
         output_token_ids: The token IDs of the output.
         cumulative_logprob: The cumulative log probability of the output.
+        prompt_token_document_ids: The document IDs of the prompt.
+        output_token_document_ids: The document IDs of the output.
     """
     # NOTE: we cannot use Union[list, array] because msgspec cannot support
     # union of 2 list types.
     _prompt_token_ids: array
     _output_token_ids: array = msgspec.field(
+        default_factory=lambda: array(VLLM_TOKEN_ID_ARRAY_TYPE, []))
+
+    _prompt_token_document_ids: Optional[array] = None
+    _output_token_document_ids: Optional[array] = msgspec.field(
         default_factory=lambda: array(VLLM_TOKEN_ID_ARRAY_TYPE, []))
 
     _prompt_embeds: Optional[torch.Tensor] = None
@@ -185,7 +195,7 @@ class SequenceData(msgspec.Struct,
     # It is used to get delta input. It is reset when `get_delta_and_reset`
     # is called.
     _new_appended_tokens: list[int] = msgspec.field(default_factory=list)
-
+    _new_appended_token_document_ids: list[int] = msgspec.field(default_factory=list)
     # It is used to compute mrope_position_ids.
     _mrope_position_delta: Optional[int] = None
 
@@ -207,12 +217,20 @@ class SequenceData(msgspec.Struct,
             (array_full(token_id, count) for token_id, count in token_counts),
         )
 
-        return SequenceData(prompt_token_ids_arr)
+        prompt_token_document_ids_arr = reduce(
+            array.__iadd__,
+            (array_full(token_id, count) for token_id, count in token_counts),
+        )
+
+        return SequenceData(prompt_token_ids_arr,
+                            _prompt_token_document_ids=prompt_token_document_ids_arr)
 
     @staticmethod
     def from_seqs(
         prompt_token_ids: GenericSequence[int],
         output_token_ids: Optional[GenericSequence[int]] = None,
+        prompt_token_document_ids: Optional[GenericSequence[int]] = None,
+        output_token_document_ids: Optional[GenericSequence[int]] = None,
         *,
         prompt_embeds: Optional[torch.Tensor] = None,
     ) -> "SequenceData":
@@ -222,6 +240,15 @@ class SequenceData(msgspec.Struct,
         """
         prompt_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                                      prompt_token_ids)
+        
+        prompt_token_document_ids_arr = None
+        output_token_document_ids_arr = None
+        if prompt_token_document_ids is not None:
+            prompt_token_document_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                                 prompt_token_document_ids)
+        if output_token_document_ids is not None:
+            output_token_document_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                                 output_token_document_ids)
 
         if output_token_ids is None:
             return SequenceData(prompt_token_ids_arr,
@@ -232,7 +259,9 @@ class SequenceData(msgspec.Struct,
 
         return SequenceData(prompt_token_ids_arr,
                             _output_token_ids=output_token_ids_arr,
-                            _prompt_embeds=prompt_embeds)
+                            _prompt_embeds=prompt_embeds,
+                            _prompt_token_document_ids=prompt_token_document_ids_arr,
+                            _output_token_document_ids=output_token_document_ids_arr)
 
     def __post_init__(self) -> None:
         assert self._prompt_token_ids.typecode == "l"
@@ -248,6 +277,11 @@ class SequenceData(msgspec.Struct,
         assert isinstance(self._output_token_ids, array)
         self._cached_all_token_ids: list[int] = list(self._prompt_token_ids +
                                                      self._output_token_ids)
+        
+        assert isinstance(self._prompt_token_document_ids, array)
+        assert isinstance(self._output_token_document_ids, array)
+        self._cached_all_token_document_ids: list[int] = list(self._prompt_token_document_ids +
+                                                              self._output_token_document_ids)
 
     def _update_cached_all_token_embeds(self):
         assert isinstance(self._prompt_embeds, torch.Tensor)
@@ -421,8 +455,15 @@ class SequenceData(msgspec.Struct,
     def get_output_token_ids(self) -> tuple[int, ...]:
         return self.output_token_ids
 
+    def get_prompt_token_document_ids(self) -> tuple[int, ...]:
+        return self.prompt_token_document_ids
+
+    def get_output_token_document_ids(self) -> tuple[int, ...]:
+        return self.output_token_document_ids
+
     def get_delta_and_reset(self) -> SequenceDataDelta:
         delta = SequenceDataDelta(self._new_appended_tokens,
+                                  self._new_output_token_document_ids,
                                   self._cumulative_logprob,
                                   self.get_num_computed_tokens(), self.stage)
         # Reset delta state.
@@ -434,7 +475,9 @@ class SequenceData(msgspec.Struct,
         self._cumulative_logprob = delta.new_cumulative_logprob
         self._stage = delta.new_stage
         self._output_token_ids.extend(delta.new_output_token_ids)
+        self._output_token_document_ids.extend(delta.new_output_token_document_ids)
         self._cached_all_token_ids.extend(delta.new_output_token_ids)
+        self._cached_all_token_document_ids.extend(delta.new_output_token_document_ids)
 
     @property
     def stage(self) -> SequenceStage:
@@ -488,7 +531,8 @@ class Sequence:
         self.data = SequenceData.from_seqs(
             self.prompt_token_ids,
             prompt_embeds=self.inputs["prompt_embeds"]
-            if self.inputs["type"] == "embeds" else None)
+            if self.inputs["type"] == "embeds" else None,
+            prompt_token_document_ids=self.prompt_token_document_ids,)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
@@ -520,6 +564,10 @@ class Sequence:
         if self.inputs["type"] == "embeds":
             return [0] * len(self.inputs["prompt_embeds"])
         return self.inputs["prompt_token_ids"]
+
+    @property
+    def prompt_token_document_ids(self) -> list[int]:
+        return self.inputs["prompt_token_document_ids"]
 
     @property
     def token_type_ids(self) -> list[int]:
@@ -575,6 +623,30 @@ class Sequence:
         this method are returned"""
         if not delta:
             return self.get_output_token_ids()
+
+        output_len = self.get_output_len()
+
+        # Get the number of new tokens
+        num_new_tokens = output_len - self._last_output_token_ids_offset
+        self._last_output_token_ids_offset = output_len
+
+        # Return new tokens
+        if num_new_tokens == 1:
+            # Optimization for single decode token case
+            # (which is what we have most of the time)
+            return self.data._cached_all_token_ids[-1]
+
+        if num_new_tokens == 0:
+            return []
+
+        return self.data._cached_all_token_ids[-num_new_tokens:]
+    
+    def get_output_token_document_ids_to_return(
+            self, delta: bool) -> Union[GenericSequence[int], int]:
+        """If delta is True, only new tokens since the last call to
+        this method are returned"""
+        if not delta:
+            return self.get_output_token_document_ids()
 
         output_len = self.get_output_len()
 
@@ -652,6 +724,9 @@ class Sequence:
 
     def get_output_token_ids(self) -> tuple[int, ...]:
         return self.data.get_output_token_ids()
+
+    def get_output_token_document_ids(self) -> tuple[int, ...]:
+        return self.data.get_output_token_document_ids()
 
     def get_cumulative_logprob(self) -> float:
         return self.data.cumulative_logprob

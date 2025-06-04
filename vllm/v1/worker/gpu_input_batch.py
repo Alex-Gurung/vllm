@@ -25,6 +25,7 @@ class CachedRequestState:
 
     req_id: str
     prompt_token_ids: list[int]
+    prompt_token_document_ids: Optional[list[int]]
     mm_inputs: list[MultiModalKwargs]
     mm_positions: list[PlaceholderRange]
     sampling_params: SamplingParams
@@ -33,6 +34,7 @@ class CachedRequestState:
     block_ids: list[list[int]]
     num_computed_tokens: int
     output_token_ids: list[int]
+    output_token_document_ids: Optional[list[int]]
 
     mrope_positions: Optional[torch.Tensor] = None
     mrope_position_delta: Optional[int] = None
@@ -51,6 +53,14 @@ class CachedRequestState:
             return self.prompt_token_ids[idx]
         else:
             return self.output_token_ids[idx - self.num_prompt_tokens]
+
+    def get_token_document_id(self, idx: int) -> int:
+        if self.prompt_token_document_ids is None:
+            return None
+        if idx < self.num_prompt_tokens:
+            return self.prompt_token_document_ids[idx]
+        else:
+            return self.output_token_document_ids[idx - self.num_prompt_tokens]
 
 
 class InputBatch:
@@ -86,6 +96,15 @@ class InputBatch:
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
+
+        self.token_document_ids_cpu_tensor = torch.zeros(
+            (max_num_reqs, max_model_len),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=False,
+        )
+        self.token_document_ids_cpu = self.token_document_ids_cpu_tensor.numpy()
+
         self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
@@ -222,7 +241,7 @@ class InputBatch:
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
 
         self.req_output_token_ids: list[Optional[list[int]]] = []
-
+        self.req_output_token_document_ids: list[Optional[list[int]]] = []
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
 
@@ -245,9 +264,11 @@ class InputBatch:
         if req_index == len(self._req_ids):
             self._req_ids.append(req_id)
             self.req_output_token_ids.append(request.output_token_ids)
+            self.req_output_token_document_ids.append(request.output_token_document_ids)
         else:
             self._req_ids[req_index] = req_id
             self.req_output_token_ids[req_index] = request.output_token_ids
+            self.req_output_token_document_ids[req_index] = request.output_token_document_ids
 
         self.req_id_to_index[req_id] = req_index
 
@@ -256,10 +277,14 @@ class InputBatch:
         self.num_prompt_tokens[req_index] = num_prompt_tokens
         self.token_ids_cpu[
             req_index, :num_prompt_tokens] = request.prompt_token_ids
+        self.token_document_ids_cpu[
+            req_index, :num_prompt_tokens] = request.prompt_token_document_ids
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
         self.token_ids_cpu[req_index,
                            start_idx:end_idx] = request.output_token_ids
+        self.token_document_ids_cpu[req_index,
+                                    start_idx:end_idx] = request.output_token_document_ids
         # Number of token ids in token_ids_cpu.
         # NOTE(woosuk): This may include spec decode tokens.
         self.num_tokens[req_index] = request.num_tokens
@@ -362,7 +387,7 @@ class InputBatch:
             return None
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
-
+        self.req_output_token_document_ids[req_index] = None
         self.greedy_reqs.discard(req_id)
         self.random_reqs.discard(req_id)
         self.top_p_reqs.discard(req_id)
@@ -401,6 +426,8 @@ class InputBatch:
             self._req_ids[i2], self._req_ids[i1] # noqa
         self.req_output_token_ids[i1], self.req_output_token_ids[i2] =\
             self.req_output_token_ids[i2], self.req_output_token_ids[i1]
+        self.req_output_token_document_ids[i1], self.req_output_token_document_ids[i2] =\
+            self.req_output_token_document_ids[i2], self.req_output_token_document_ids[i1]
         assert old_id_i1 is not None and old_id_i2 is not None
         self.req_id_to_index[old_id_i1], self.req_id_to_index[old_id_i2] =\
             self.req_id_to_index[old_id_i2], self.req_id_to_index[old_id_i1]
@@ -436,6 +463,10 @@ class InputBatch:
         self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]
         self.token_ids_cpu[i2, ...] = tmp
 
+        tmp = self.token_document_ids_cpu[i1, ...].copy()
+        self.token_document_ids_cpu[i1, ...] = self.token_document_ids_cpu[i2, ...]
+        self.token_document_ids_cpu[i2, ...] = tmp
+
         swap_dict_values(self.generators, i1, i2)
         swap_dict_values(self.min_tokens, i1, i2)
         swap_dict_values(self.bad_words_token_ids, i1, i2)
@@ -458,6 +489,7 @@ class InputBatch:
             # The batched states are empty.
             self._req_ids.clear()
             self.req_output_token_ids.clear()
+            self.req_output_token_document_ids.clear()
             return
 
         # NOTE(woosuk): This function assumes that the empty_req_indices
@@ -476,15 +508,20 @@ class InputBatch:
             # Swap the states.
             req_id = self._req_ids[last_req_index]
             output_token_ids = self.req_output_token_ids[last_req_index]
+            output_token_document_ids = self.req_output_token_document_ids[last_req_index]
             assert req_id is not None
             self._req_ids[empty_index] = req_id
             self._req_ids[last_req_index] = None
             self.req_output_token_ids[empty_index] = output_token_ids
             self.req_output_token_ids[last_req_index] = None
+            self.req_output_token_document_ids[empty_index] = output_token_document_ids
+            self.req_output_token_document_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index
 
             num_tokens = self.num_tokens[last_req_index]
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
+                last_req_index, :num_tokens]
+            self.token_document_ids_cpu[empty_index, :num_tokens] = self.token_document_ids_cpu[
                 last_req_index, :num_tokens]
             self.num_tokens[empty_index] = num_tokens
             self.num_tokens_no_spec[empty_index] = self.num_tokens_no_spec[
@@ -533,7 +570,7 @@ class InputBatch:
         # Trim lists to the batch size.
         del self._req_ids[self.num_reqs:]
         del self.req_output_token_ids[self.num_reqs:]
-
+        del self.req_output_token_document_ids[self.num_reqs:]
     def refresh_sampling_metadata(self):
         self.sampling_metadata = self._make_sampling_metadata()
 
@@ -566,8 +603,10 @@ class InputBatch:
             # the sampling process. Hence copy these tensors only when
             # there are requests which need penalties to be applied.
             prompt_token_ids = self._make_prompt_token_ids_tensor()
+            prompt_token_document_ids = self._make_prompt_token_document_ids_tensor()
         else:
             prompt_token_ids = None
+            prompt_token_document_ids = None
 
         allowed_token_ids_mask: Optional[torch.Tensor] = None
         if not self.no_allowed_token_ids:
@@ -586,10 +625,12 @@ class InputBatch:
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,
+            prompt_token_document_ids=prompt_token_document_ids,
             frequency_penalties=self.frequency_penalties[:num_reqs],
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=cast(list[list[int]], self.req_output_token_ids),
+            output_token_document_ids=cast(list[list[int]], self.req_output_token_document_ids),
             min_tokens=self.min_tokens,
             no_penalties=self.no_penalties,
             logit_bias=self.logit_bias[:num_reqs],
@@ -613,6 +654,24 @@ class InputBatch:
         for i in range(self.num_reqs):
             prompt_token_ids[i, self.num_prompt_tokens[i]:] = self.vocab_size
         return prompt_token_ids_cpu_tensor.to(device=self.device,
+                                              non_blocking=True)
+    
+    def _make_prompt_token_document_ids_tensor(self) -> torch.Tensor:
+        max_prompt_len = self.num_prompt_tokens[:self.num_reqs].max()
+        prompt_token_document_ids_cpu_tensor = torch.empty(
+            (self.num_reqs, max_prompt_len),
+            device="cpu",
+            dtype=torch.int64,
+            pin_memory=self.pin_memory,
+        )
+        prompt_token_document_ids = prompt_token_document_ids_cpu_tensor.numpy()
+        prompt_token_document_ids[:] = self.token_document_ids_cpu[:self.
+                                                 num_reqs, :max_prompt_len]
+        # Use the value of vocab_size as a pad since we don't have a
+        # token_id of this value.
+        for i in range(self.num_reqs):
+            prompt_token_document_ids[i, self.num_prompt_tokens[i]:] = self.vocab_size
+        return prompt_token_document_ids_cpu_tensor.to(device=self.device,
                                               non_blocking=True)
 
     def make_lora_inputs(

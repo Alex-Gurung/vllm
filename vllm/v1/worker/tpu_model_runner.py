@@ -386,6 +386,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
+                prompt_token_document_ids=new_req_data.prompt_token_document_ids,
                 mm_inputs=new_req_data.mm_inputs,
                 mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
@@ -393,6 +394,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
+                output_token_document_ids=[],
                 lora_request=new_req_data.lora_request,
             )
 

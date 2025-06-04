@@ -87,6 +87,7 @@ class RequestState:
         arrival_time: float,
         queue: Optional[RequestOutputCollector],
         log_stats: bool,
+        prompt_token_document_ids: Optional[list[int]],
     ):
         self.request_id = request_id
         self.parent_req = parent_req
@@ -95,6 +96,7 @@ class RequestState:
         self.output_kind = output_kind
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
+        self.prompt_token_document_ids = prompt_token_document_ids
         self.prompt_len = len(prompt_token_ids)
         self.logprobs_processor = logprobs_processor
         self.detokenizer = detokenizer
@@ -127,6 +129,7 @@ class RequestState:
             output_kind=request.sampling_params.output_kind,
             prompt=prompt,
             prompt_token_ids=request.prompt_token_ids,
+            prompt_token_document_ids=request.prompt_token_document_ids,
             logprobs_processor=LogprobsProcessor.from_new_request(
                 tokenizer=tokenizer,
                 request=request,
@@ -192,6 +195,7 @@ class RequestState:
             request_id=request_id,
             prompt=self.prompt,
             prompt_token_ids=self.prompt_token_ids,
+            prompt_token_document_ids=self.prompt_token_document_ids,
             prompt_logprobs=prompt_logprobs,
             outputs=outputs,
             finished=finished,
@@ -204,6 +208,7 @@ class RequestState:
         token_ids: list[int],
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
+        token_document_ids: Optional[list[int]] = None,
     ) -> CompletionOutput:
 
         finished = finish_reason is not None
@@ -223,6 +228,7 @@ class RequestState:
             index=self.request_index,
             text=text,
             token_ids=token_ids,
+            token_document_ids=token_document_ids,
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,

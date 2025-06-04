@@ -11,6 +11,8 @@ class SpecDecodeMetadata:
 
     # [num_tokens]
     draft_token_ids: torch.Tensor
+    # [num_tokens]
+    draft_token_document_ids: torch.Tensor
     # [batch_size]
     num_draft_tokens: list[int]
     # [batch_size]

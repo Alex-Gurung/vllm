@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, Union, cast
 
 import torch
 from typing_extensions import NotRequired, TypedDict, TypeIs, TypeVar
+from typing import Callable
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalDataDict, MultiModalInputs
@@ -15,6 +16,8 @@ class TextPrompt(TypedDict):
 
     prompt: str
     """The input text to be tokenized before passing to the model."""
+
+    convert_tokens_to_document_ids: NotRequired[Callable]
 
     multi_modal_data: NotRequired["MultiModalDataDict"]
     """
@@ -41,6 +44,9 @@ class TokensPrompt(TypedDict):
 
     prompt_token_ids: list[int]
     """A list of token IDs to pass to the model."""
+
+    prompt_token_document_ids: NotRequired[list[int]]
+    """The document IDs of the prompt tokens."""
 
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
@@ -177,6 +183,9 @@ class TokenInputs(TypedDict):
     token_type_ids: NotRequired[list[int]]
     """The token type IDs of the prompt."""
 
+    prompt_token_document_ids: NotRequired[list[int]]
+    """The document IDs of the prompt tokens."""
+
     prompt: NotRequired[str]
     """
     The original prompt text corresponding to the token IDs, if available.
@@ -193,10 +202,11 @@ def token_inputs(
     token_type_ids: Optional[list[int]] = None,
     prompt: Optional[str] = None,
     cache_salt: Optional[str] = None,
+    prompt_token_document_ids: Optional[list[int]] = None,
 ) -> TokenInputs:
     """Construct [`TokenInputs`][vllm.inputs.data.TokenInputs] from optional
     values."""
-    inputs = TokenInputs(type="token", prompt_token_ids=prompt_token_ids)
+    inputs = TokenInputs(type="token", prompt_token_ids=prompt_token_ids, prompt_token_document_ids=prompt_token_document_ids)
 
     if prompt is not None:
         inputs["prompt"] = prompt

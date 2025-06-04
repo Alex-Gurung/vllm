@@ -42,6 +42,7 @@ class CompletionOutput:
     index: int
     text: str
     token_ids: GenericSequence[int]
+    token_document_ids: Optional[GenericSequence[int]]
     cumulative_logprob: Optional[float]
     logprobs: Optional[SampleLogprobs]
     finish_reason: Optional[str] = None
@@ -55,6 +56,7 @@ class CompletionOutput:
         return (f"CompletionOutput(index={self.index}, "
                 f"text={self.text!r}, "
                 f"token_ids={self.token_ids}, "
+                f"token_document_ids={self.token_document_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"logprobs={self.logprobs}, "
                 f"finish_reason={self.finish_reason}, "
@@ -107,6 +109,7 @@ class RequestOutput:
         request_id: str,
         prompt: Optional[str],
         prompt_token_ids: Optional[list[int]],
+        prompt_token_document_ids: Optional[list[int]],
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: list[CompletionOutput],
         finished: bool,
@@ -128,6 +131,7 @@ class RequestOutput:
         self.request_id = request_id
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
+        self.prompt_token_document_ids = prompt_token_document_ids
         self.multi_modal_placeholders = multi_modal_placeholders or {}
         self.prompt_logprobs = prompt_logprobs
         self.outputs = outputs
@@ -155,6 +159,10 @@ class RequestOutput:
                                           MutableSequence):
                             completion.token_ids = list(completion.token_ids)
                         completion.token_ids.extend(next_completion.token_ids)
+                        if not isinstance(completion.token_document_ids,
+                                          MutableSequence):
+                            completion.token_document_ids = list(completion.token_document_ids)
+                        completion.token_document_ids.extend(next_completion.token_document_ids)
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
                             completion.logprobs.extend(
@@ -210,6 +218,7 @@ class RequestOutput:
                 request_id="",
                 prompt=None,
                 prompt_token_ids=[],
+                prompt_token_document_ids=[],
                 prompt_logprobs=None,
                 outputs=[],
                 finished=False)
@@ -233,6 +242,7 @@ class RequestOutput:
                 text_buffer_length, delta)
 
             output_token_ids = seq.get_output_token_ids_to_return(delta)
+            output_token_document_ids = seq.get_output_token_document_ids_to_return(delta)
             num_output_tokens = 1 if isinstance(output_token_ids,
                                                 int) else len(output_token_ids)
             num_cached_tokens = seq.data.get_num_cached_tokens()
@@ -261,6 +271,7 @@ class RequestOutput:
                         CompletionOutput(index=i,
                                          text="",
                                          token_ids=[],
+                                         token_document_ids=[],
                                          cumulative_logprob=None,
                                          logprobs=None,
                                          finish_reason=None,
@@ -276,6 +287,12 @@ class RequestOutput:
                     output.token_ids.append(output_token_ids)
                 else:
                     output.token_ids = output_token_ids
+
+                if isinstance(output_token_document_ids, int):
+                    output.token_document_ids.clear()
+                    output.token_document_ids.append(output_token_document_ids)
+                else:
+                    output.token_document_ids = output_token_document_ids
 
                 output.cumulative_logprob = seq.get_cumulative_logprob() \
                     if include_logprobs else None

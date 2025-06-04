@@ -388,6 +388,8 @@ class LLM:
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
         priority: Optional[list[int]] = None,
+        prompt_token_document_ids: Optional[Union[list[int], list[list[int]]]] = None,
+        convert_tokens_to_document_ids: Optional[Callable] = None,
     ) -> list[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -441,6 +443,8 @@ class LLM:
             parsed_prompts = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, list[str]]], prompts),
                 prompt_token_ids=prompt_token_ids,
+                prompt_token_document_ids=prompt_token_document_ids,
+                convert_tokens_to_document_ids=convert_tokens_to_document_ids,
             )
         else:
             parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
@@ -1337,6 +1341,8 @@ class LLM:
         self,
         prompts: Optional[Union[str, list[str]]],
         prompt_token_ids: Optional[Union[list[int], list[list[int]]]],
+        prompt_token_document_ids: Optional[Union[list[int], list[list[int]]]],
+        convert_tokens_to_document_ids: Optional[Callable],
     ):
         # skip_tokenizer_init is now checked in engine
 
@@ -1364,9 +1370,11 @@ class LLM:
             item: PromptType
 
             if prompts is not None:
-                item = TextPrompt(prompt=prompts[i])
+                item = TextPrompt(prompt=prompts[i], convert_tokens_to_document_ids=convert_tokens_to_document_ids)
             elif prompt_token_ids is not None:
-                item = TokensPrompt(prompt_token_ids=prompt_token_ids[i])
+                if prompt_token_document_ids is None:
+                    prompt_token_document_ids = [0] * len(prompt_token_ids[i])
+                item = TokensPrompt(prompt_token_ids=prompt_token_ids[i], prompt_token_document_ids=prompt_token_document_ids)
             else:
                 raise AssertionError
 
