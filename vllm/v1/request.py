@@ -55,7 +55,10 @@ class Request:
         self._output_token_ids: list[int] = []
         self._output_token_document_ids: list[int] = []
         self._all_token_ids: list[int] = self.prompt_token_ids.copy()
-        self._all_token_document_ids: list[int] = self.prompt_token_document_ids.copy()
+        if self.prompt_token_document_ids is not None:
+            self._all_token_document_ids: list[int] = self.prompt_token_document_ids.copy()
+        else:
+            self._all_token_document_ids: list[int] = []
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: Optional[str] = cache_salt
