@@ -40,10 +40,12 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-create_block_mask_compiled = torch.compile(create_block_mask,
-                                           fullgraph=True,
-                                           mode="reduce-overhead")
-flex_attention_compiled = torch.compile(flex_attention, fullgraph=True)
+# create_block_mask_compiled = torch.compile(create_block_mask,
+#                                            fullgraph=True,
+#                                            mode="reduce-overhead")
+create_block_mask_compiled = create_block_mask
+# flex_attention_compiled = torch.compile(flex_attention, fullgraph=True)
+flex_attention_compiled = flex_attention
 
 
 def _offsets_to_doc_ids_tensor(offsets: torch.Tensor) -> torch.Tensor:
@@ -366,13 +368,14 @@ class FlexAttentionMetadataBuilder:
         # context len is the number of tokens between the first context document and the end of the suffix
         context_len = context_start - index
         longest_document_length = max(longest_document_length, ongoing_document_length)
-        sliding_window_size = 2 * longest_document_length if longest_document_length > 1 else -1
+        sliding_window_size = 2 * longest_document_length if longest_document_length >= 1 else -1
         prefix_len = index
         # Calculate suffix length
         suffix_start = index
         # get the length of the suffix, inefficient for now:
         suffix_len = num_actual_tokens - index
-        if num_actual_tokens == 1:
+        if num_actual_tokens == 1 or sliding_window_size == -1:
+            # either we have a single token or the longest document is < 1 in which case we just use flash attention
             return prefix_len, context_start, context_len, suffix_start, suffix_len, longest_document_length, sliding_window_size
         # APPROXIMATING TO POWERS OF 2 FOR BETTER PERFORMANCE
         # WE USE ONE BLOCK SIZE FOR ALL PARTS, WHICH IS THE CLOSEST POWER OF 2
@@ -395,8 +398,10 @@ class FlexAttentionMetadataBuilder:
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
-
-        prefix_len, context_start, context_len, suffix_start, suffix_len, longest_document_length, sliding_window_size = self.get_prefix_context_suffix_lengths(num_actual_tokens, token_document_ids)
+        if token_document_ids is not None:
+            prefix_len, context_start, context_len, suffix_start, suffix_len, longest_document_length, sliding_window_size = self.get_prefix_context_suffix_lengths(num_actual_tokens, token_document_ids)
+        else:
+            prefix_len, context_start, context_len, suffix_start, suffix_len, longest_document_length, sliding_window_size = 0, 0, 0, 0, 0, 0, -1
 
         block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
@@ -624,7 +629,9 @@ class FlexAttentionImpl(FlashAttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        if num_actual_tokens > 1:
+        longest_document_length = attn_metadata.longest_document_length
+
+        if num_actual_tokens > 1 and longest_document_length > 1:
             key_cache, value_cache = kv_cache.unbind(0)
 
             torch.ops._C_cache_ops.reshape_and_cache_flash(

@@ -277,8 +277,9 @@ class InputBatch:
         self.num_prompt_tokens[req_index] = num_prompt_tokens
         self.token_ids_cpu[
             req_index, :num_prompt_tokens] = request.prompt_token_ids
-        self.token_document_ids_cpu[
-            req_index, :num_prompt_tokens] = request.prompt_token_document_ids
+        if request.prompt_token_document_ids is not None:
+            self.token_document_ids_cpu[
+                req_index, :num_prompt_tokens] = request.prompt_token_document_ids
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
         self.token_ids_cpu[req_index,

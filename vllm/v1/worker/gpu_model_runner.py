@@ -463,7 +463,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if num_new_tokens == 1:
                 # Avoid slicing list in most common case.
                 req_state.output_token_ids.append(req_data.new_token_ids[-1])
-                req_state.output_token_document_ids.append(req_data.new_token_document_ids[-1])
+                if req_data.new_token_document_ids is not None and len(req_data.new_token_document_ids) > 0:
+                    req_state.output_token_document_ids.append(req_data.new_token_document_ids[-1])
             elif num_new_tokens > 0:
                 req_state.output_token_ids.extend(
                     req_data.new_token_ids[-num_new_tokens:])
@@ -499,7 +500,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 req_index,
                 start_token_index:end_token_index] = req_data.new_token_ids
             
-            if req_data.new_token_document_ids is not None:
+            if req_data.new_token_document_ids is not None and len(req_data.new_token_document_ids) > 0:
                 self.input_batch.token_document_ids_cpu[
                     req_index,
                     start_token_index:end_token_index] = req_data.new_token_document_ids
@@ -1207,6 +1208,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             return self.kv_connector_no_forward(scheduler_output)
 
+        print("execute after update states")
         # Prepare the decoder inputs.
         attn_metadata, logits_indices, spec_decode_metadata = (
             self._prepare_inputs(scheduler_output))
@@ -1275,6 +1277,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                 num_input_tokens, intermediate_tensors, True)
 
+        print("execute after sync and slice intermediate tensors")
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata,

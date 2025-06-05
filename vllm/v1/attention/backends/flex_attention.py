@@ -280,7 +280,8 @@ class FlexAttentionMetadataBuilder:
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata):
+              common_attn_metadata: CommonAttentionMetadata,
+              token_document_ids: torch.Tensor):
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
