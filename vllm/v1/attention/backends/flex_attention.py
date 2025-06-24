@@ -302,6 +302,13 @@ class FlexAttentionMetadataBuilder:
 
         block_size = self.kv_cache_spec.block_size
         max_possible_seq_len = self.runner.model_config.max_model_len
+
+        if self.runner.cache_config.num_gpu_blocks is None:
+            # print("setting num_gpu_blocks to 54318")
+            # print("AHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH")
+            self.runner.cache_config.num_gpu_blocks = 54318
+            pass
+
         total_cache_tokens = (self.runner.cache_config.num_gpu_blocks *
                               block_size)
 
@@ -356,6 +363,7 @@ class FlexAttentionImpl(AttentionImpl):
         blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
+        use_irope: bool = False,
     ) -> None:
         if blocksparse_params is not None:
             # TODO we should support this :think

@@ -181,7 +181,7 @@ class CudaPlatformBase(Platform):
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:
         # return "vllm.v1.attention.backends.myflex.FlexAttentionBackend"
-        return "vllm.v1.attention.backends.flex.FlexAttentionBackend"
+        return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
         if use_mla:
             # TODO(lucas): refactor to  be more concise
             #  we should probably consider factoring out V1 here
