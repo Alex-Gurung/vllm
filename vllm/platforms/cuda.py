@@ -193,7 +193,7 @@ class CudaPlatformBase(Platform):
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:
-        return "vllm.v1.attention.backends.myflex.FlexAttentionBackend"
+        # return "vllm.v1.attention.backends.myflex.FlexAttentionBackend"
         # return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
         if use_mla:
             # TODO(lucas): refactor to  be more concise
