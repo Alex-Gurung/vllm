@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import gc
 import time
 import weakref
@@ -499,12 +500,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     req_state.output_token_ids.append(new_token_ids[-1])
                     if req_data.new_token_document_ids is not None and len(req_data.new_token_document_ids) > 0:
                         req_state.output_token_document_ids.append(req_data.new_token_document_ids[-1])
-            elif num_new_tokens > 0:
+                elif num_new_tokens > 0:
                     req_state.output_token_ids.extend(
-                        new_token_ids[-num_new_tokens:])
+                            new_token_ids[-num_new_tokens:])
 
-                req_state.output_token_document_ids.extend(
-                    req_data.new_token_document_ids[-num_new_tokens:])
+                    req_state.output_token_document_ids.extend(
+                        req_data.new_token_document_ids[-num_new_tokens:])
             # Update the block IDs.
             if not resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
@@ -539,14 +540,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     req_index,
                     start_token_index:end_token_index] = new_token_ids
                 
-            if req_data.new_token_document_ids is not None and len(req_data.new_token_document_ids) > 0:
-                self.input_batch.token_document_ids_cpu[
-                    req_index,
-                    start_token_index:end_token_index] = req_data.new_token_document_ids
+                if req_data.new_token_document_ids is not None and len(req_data.new_token_document_ids) > 0:
+                    self.input_batch.token_document_ids_cpu[
+                        req_index,
+                        start_token_index:end_token_index] = req_data.new_token_document_ids
             
-            self.input_batch.num_tokens_no_spec[
-                    req_index] = end_token_index
-            self.input_batch.num_tokens[req_index] = end_token_index
+                self.input_batch.num_tokens_no_spec[
+                        req_index] = end_token_index
+                self.input_batch.num_tokens[req_index] = end_token_index
 
             # Add spec_token_ids to token_ids_cpu.
             spec_token_ids = (
@@ -759,7 +760,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             attn_metadata_i = (builder.build(
                 common_prefix_len=common_prefix_len,
                 common_attn_metadata=common_attn_metadata,
-                    token_document_ids=self.input_document_ids_cpu[:total_num_scheduled_tokens]
                 )
             )
 
@@ -1267,6 +1267,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states: torch.Tensor,
         num_scheduled_tokens: int,
         num_scheduled_tokens_np: np.ndarray,
+        finished_sending: Optional[set[str]],
+        finished_recving: Optional[set[str]],
     ) -> ModelRunnerOutput:
         assert self.input_batch.num_reqs ==\
             len(self.input_batch.pooling_params), \
@@ -1297,10 +1299,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=[],
+            sampled_token_document_ids=[],
             spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
         )
 
     @torch.inference_mode()
@@ -1311,14 +1316,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
-            if has_kv_transfer_group():
-                with set_forward_context(None, self.vllm_config):
-                    self.maybe_setup_kv_connector(scheduler_output)
+            if not has_kv_transfer_group():
+                # Return empty ModelRunnerOutput if there's no work to do.
+                return EMPTY_MODEL_RUNNER_OUTPUT
 
-            # Return empty ModelRunnerOutput if there's no work to do.
-            return EMPTY_MODEL_RUNNER_OUTPUT
+            return self.kv_connector_no_forward(scheduler_output)
 
-        print("execute after update states")
+        # print("execute after update states")
         # Prepare the decoder inputs.
         (attn_metadata, attention_cuda_graphs, logits_indices,
          spec_decode_metadata,
@@ -1414,6 +1418,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
             self.maybe_wait_for_kv_save()
+            finished_sending, finished_recving = (
+                self.get_finished_kv_transfers(scheduler_output))
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
@@ -1439,7 +1445,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             if self.input_batch.pooling_params:
                 return self._pool(hidden_states, num_scheduled_tokens,
-                                  num_scheduled_tokens_np)
+                                  num_scheduled_tokens_np, finished_sending,
+                                  finished_recving)
 
             sample_hidden_states = hidden_states[logits_indices]
             logits = self.model.compute_logits(sample_hidden_states, None)
@@ -1596,10 +1603,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
+            sampled_token_document_ids=valid_sampled_token_document_ids,
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
             num_nans_in_logits=num_nans_in_logits,
         )
 
@@ -1731,6 +1741,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids = draft_token_ids.tolist()
         return spec_token_ids
 
+    def kv_connector_no_forward(
+            self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
+        # KV send/recv even if no work to do.
+        with set_forward_context(None, self.vllm_config):
+            self.maybe_setup_kv_connector(scheduler_output)
+            finished_sending, finished_recving = (
+                self.get_finished_kv_transfers(scheduler_output))
+
+        if not finished_sending and not finished_recving:
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
+        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.finished_sending = finished_sending
+        output.finished_recving = finished_recving
+        return output
+
     @staticmethod
     def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput"):
         # Update KVConnector with the KVConnector metadata forward().
@@ -1751,6 +1777,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def maybe_wait_for_kv_save() -> None:
         if has_kv_transfer_group():
             get_kv_transfer_group().wait_for_save()
+
+    @staticmethod
+    def get_finished_kv_transfers(
+        scheduler_output: "SchedulerOutput",
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        if has_kv_transfer_group():
+            return get_kv_transfer_group().get_finished(
+                scheduler_output.finished_req_ids)
+        return None, None
 
     def propose_ngram_draft_token_ids(
         self,
