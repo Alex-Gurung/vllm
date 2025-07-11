@@ -73,7 +73,7 @@ class NewRequestData:
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
                 f"prompt_token_ids_len={len(self.prompt_token_ids)},"
-                f"prompt_token_document_ids_len={len(self.prompt_token_document_ids)},"
+                f"prompt_token_document_ids_len={len(self.prompt_token_document_ids) if self.prompt_token_document_ids else None},"
                 f"mm_inputs={self.mm_inputs},"
                 f"mm_hashes={self.mm_hashes},"
                 f"mm_positions={self.mm_positions},"
