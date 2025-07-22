@@ -44,7 +44,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .adapters import as_seq_cls_model
 from .interfaces import SupportsLoRA, SupportsPP
 from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen2 import Qwen2Model
@@ -551,22 +550,4 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
-        loaded_weights = loader.load_weights(weights)
-        
-        # Initialize reasoning projector after loading base weights
-        self.model._init_reasoning_projector_from_base(self.model.layers[-1].mlp)
-        
-        # Initialize reasoning projector vocab projection from LM head
-        if self.model.reasoning_projector is not None and self.model.reasoning_projector.vocab_projection:
-            try:
-                # For ParallelLMHead, we need to access the weight differently
-                if hasattr(self.lm_head, 'weight') and isinstance(self.lm_head.weight, torch.Tensor):
-                    self.model.reasoning_projector.projection_lm_head.weight.data.copy_(self.lm_head.weight.data)
-                    logger.info("Successfully initialized reasoning projector vocab projection from LM head")
-            except Exception as e:
-                logger.warning(f"Failed to initialize reasoning projector vocab projection: {e}")
-        
-        return loaded_weights
-
-
-Qwen3ForSequenceClassification = as_seq_cls_model(Qwen3ForCausalLM)
+        return loader.load_weights(weights)

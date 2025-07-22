@@ -22,7 +22,6 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
                            CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SampleLogprobs, SequenceOutput)
-from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
     # yapf: disable
@@ -126,9 +125,6 @@ class SamplerOutput(
     # corresponding to the sampled token ids). Used when prompt embeddings are
     # specified in lieu of prompt token ids or text.
     sampled_token_embeds: Optional[torch.Tensor] = None
-
-    # Spec decode metrics populated by workers.
-    spec_decode_worker_metrics: Optional[SpecDecodeWorkerMetrics] = None
 
     # Optional last hidden states from the model.
     hidden_states: Optional[torch.Tensor] = None

@@ -80,6 +80,7 @@ class Request:
         self._output_token_ids: list[int] = []
         self._output_token_document_ids: list[int] = []
         self._all_token_ids: list[int] = self.prompt_token_ids.copy()
+        self.num_output_placeholders = 0  # Used in async scheduling.
         if self.prompt_token_document_ids is not None:
             self._all_token_document_ids: list[int] = self.prompt_token_document_ids.copy()
         else:
