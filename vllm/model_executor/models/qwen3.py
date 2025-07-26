@@ -49,7 +49,62 @@ from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen2 import Qwen2Model
 from .utils import AutoWeightsLoader, PPMissingLayer, maybe_prefix
 
+from transformers import AutoTokenizer
+from vllm.forward_context import ForwardContext, get_forward_context, set_forward_context
+import copy
+
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
+
+
 logger = init_logger(__name__)
+
+class Qwen3MLPWithVocabProjection(nn.Module):
+    def __init__(
+        self,
+        config: Qwen3Config,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        vocab_projection: bool = False,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.mlp = Qwen3MLP(
+            hidden_size=self.hidden_size,
+            intermediate_size=config.intermediate_size,
+            # intermediate_size=self.hidden_size,
+            hidden_act=config.hidden_act,
+            quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
+        )
+
+        self.vocab_projection = vocab_projection
+        if vocab_projection:
+            self.norm_before_projection = RMSNorm(config.hidden_size,
+                eps=config.rms_norm_eps)
+            self.projection_lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+            self.projection_activation = nn.LeakyReLU()
+            # self.projection_activation = nn.Tanh()
+        # print the sizes of the layers
+        # print(f"norm_before_projection: {self.norm_before_projection.weight.shape}")
+        # print(f"projection_lm_head: {self.projection_lm_head.weight.shape}")
+        # print(f"mlp: {self.mlp.weight.shape}")
+        # print(f"vocab_size: {config.vocab_size}")
+        # print(f"hidden_size: {config.hidden_size}")
+        # print(f"intermediate_size: {config.intermediate_size}")
+        # x = 1/0
+        
+    def forward(self, x):
+        residual = x
+        x = self.mlp(x)
+        if not self.vocab_projection:
+            return x
+        x = residual + x
+        x = self.norm_before_projection(x)
+        x = self.projection_lm_head(x)
+        x = self.projection_activation(x)
+
+        return x
 
 
 class Qwen3Attention(nn.Module):
@@ -243,6 +298,185 @@ class Qwen3Model(Qwen2Model):
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,
                          decoder_layer_type=Qwen3DecoderLayer)
+        self.handles_full_sequence = True
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        # self.vocab_projection = True
+        self.vocab_projection = False
+        self.reasoning_projector = Qwen3MLPWithVocabProjection(config, 
+            cache_config, 
+            quant_config, 
+            prefix="reasoning_projector",
+            vocab_projection=self.vocab_projection)
+
+    def normal_forward(self, input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.get_input_embeddings(input_ids)
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+        for layer in self.layers[self.start_layer:self.end_layer]:
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+            )
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({
+                "hidden_states": hidden_states,
+                "residual": residual
+            })
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
+
+    def reasoning_forward(self, 
+        num_reasoning_steps: int,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        # print(f"num_reasoning_steps: {num_reasoning_steps}")
+        # print(f"input_ids: {input_ids}")
+        # print(f"positions: {positions}")
+        # print(f"intermediate_tensors: {intermediate_tensors}")
+        # print(f"inputs_embeds: {inputs_embeds}")
+
+        # attn_metadata = copy.deepcopy(get_forward_context())
+        # attn_metadata = get_forward_context().attn_metadata
+        if inputs_embeds is None:
+            inputs_embeds = self.get_input_embeddings(input_ids)
+        
+        # x = 1/0
+        # projections = []
+        for idx in range(num_reasoning_steps):
+            # with torch.no_grad():
+            outputs = self.normal_forward(input_ids=None, 
+                    positions=positions + idx, 
+                    intermediate_tensors=None, 
+                    inputs_embeds=inputs_embeds)
+            # pass it to reasoning projector
+            if idx != num_reasoning_steps - 1:
+                inputs_embeds = self.reasoning_projector(outputs)
+                # print(self.reasoning_projector)
+                # reasoning_projection is in vocab space, we multiply by self.llm's token embeddings to get
+                # (batch_size, vocab_size) X (vocab_size, hidden_size) -> (batch_size, hidden_size)
+                # print(f"inputs_embeds shape: {inputs_embeds.shape}")
+                # print(f"embed_tokens.weight shape: {self.embed_tokens.weight.shape}")
+                if self.reasoning_projector.vocab_projection:
+                    inputs_embeds = inputs_embeds @ self.embed_tokens.weight.to(inputs_embeds.device)
+                # projections.append(inputs_embeds)
+        
+        # set_forward_context(attn_metadata)
+        # by default positions looks like [235] or something where 235 is the current position
+        # we want the new positions to look like [235, 236, 237, ...]
+        # we can use arange to get a list like [1, 2, 3]
+        # original_position = positions[0]
+        # positions_to_add = torch.arange(1, num_reasoning_steps + 1)
+        # positions_to_add += original_position
+        # positions_to_add = positions_to_add.to(positions.device)
+        # positions = torch.cat([positions, positions_to_add], dim=0)
+        # print(f"positions: {positions}")
+
+        # inputs_embeds = torch.stack([p.squeeze().to(inputs_embeds.device) for p in projections], dim=0).unsqueeze(0)
+        # print(f"inputs_embeds shape: {inputs_embeds.shape}")
+        # # now run forward with all of the projections
+        # # return self.normal_forward(input_ids=None, 
+        # #         positions=positions, 
+        # #         intermediate_tensors=None, 
+        # #         inputs_embeds=inputs_embeds)
+        return outputs
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        all_token_ids: Optional[torch.Tensor] = None,
+    # ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> Union[tuple[Union[torch.Tensor, IntermediateTensors], int], Union[torch.Tensor, IntermediateTensors]]:
+        # print(f"INSIDE FORWARD")
+        # print(f"positions: {positions}")
+        # special_start_token = 151650
+        # special_end_token = 151651
+        # special_start_token = 151665
+        # special_end_token = 151666
+        special_start_token = 151657
+        special_end_token = 151658
+        do_reasoning = False
+        num_reasoning_steps = 0
+        if inputs_embeds is None and all_token_ids is not None:
+            # print(f"all_token_ids: {all_token_ids[-10:]}")
+            # print(f"input_ids shape: {input_ids.shape}")
+            is_special_end_token = (input_ids == special_end_token).sum()
+            # print(f"input_ids: {input_ids}")
+            # print(f"is_special_end_token: {is_special_end_token}")
+            
+            if input_ids.shape[0] == 1 and (input_ids == special_end_token).sum() == 1:
+                # print(f"Found {special_end_token} in input_ids! should search backwards inside all_token_ids")
+                # search backwards to find the first 151651
+                # in theory only the last token is 151666
+                # search backwards to find the first 151650
+                end = all_token_ids.shape[0] - 1
+                start = None
+                for i in range(end, -1, -1):
+                    if all_token_ids[i] == special_start_token:
+                        # print(f"Found {special_start_token} at position {i}")
+                        start = i
+                        break
+                    if end - i > 3:
+                        break
+                if start is None:
+                    # print(f"No {special_start_token} found, skipping")
+                    pass
+                else:
+                    # now decode what's in between 
+                    # print(f"Decoding from {start} to {end}")
+                    # decode the tokens in between
+                    tokens = all_token_ids[start+1:end]
+                    # print(f"Tokens: {tokens}")
+                    decoded_tokens = tokenizer.decode(tokens)
+                    # print(f"Decoded Tokens: {decoded_tokens}")
+                    # decoded tokens should be a number
+                    try:
+                        num_reasoning_steps = int(decoded_tokens)
+                        # print(f"Number of steps: {num_reasoning_steps}")
+                        do_reasoning = True
+                    except ValueError:
+                        pass
+                        # print(f"Decoded tokens are not a number: {decoded_tokens}")
+
+        if not do_reasoning:
+            outputs = self.normal_forward(input_ids, 
+                    positions, 
+                    intermediate_tensors, 
+                    inputs_embeds)
+            if all_token_ids is not None:
+                return outputs, 0
+            else:
+                return outputs
+        # doing reasoning for the next num_steps
+        # print(f"doing reasoning for {num_reasoning_steps} steps")
+        outputs = self.reasoning_forward(num_reasoning_steps, 
+            input_ids, 
+            positions, 
+            intermediate_tensors, 
+            inputs_embeds)
+        if all_token_ids is not None:
+            return outputs, num_reasoning_steps
+        else:
+            return outputs
 
 
 class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
@@ -257,6 +491,7 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             "up_proj",
         ],
     }
+    handles_full_sequence = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -297,9 +532,11 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        all_token_ids: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        # print(f"all_token_ids: {all_token_ids}")
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
+                                   inputs_embeds, all_token_ids=all_token_ids)
         return hidden_states
 
     def compute_logits(

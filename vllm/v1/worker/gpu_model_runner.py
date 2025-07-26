@@ -1400,13 +1400,40 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_cuda_graphs=skip_cuda_graphs,
         ):
             self.maybe_setup_kv_connector(scheduler_output)
-
-            model_output = self.model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-            )
+            # get full sequence seen so far
+            input_batch = self.input_batch
+            # only support batch size of 1 for now
+            # input_batch.token_ids_cpu has shape (batch_size, max_model_len)
+            num_tokens = self.seq_lens_cpu[0]
+            token_ids = input_batch.token_ids_cpu[0, :num_tokens]
+            
+            # print(f"token_ids: {token_ids}")
+            # print(f"token_ids shape: {token_ids.shape}")
+            # print(f"token_ids dtype: {token_ids.dtype}")
+            # print(f"token_ids device: {token_ids.device}")
+            # print(self.model)
+            if hasattr(self.model, "handles_full_sequence") and self.model.handles_full_sequence:
+                # print("PASSING TOKEN_IDS TO MODEL")
+                if not hasattr(input_batch, "position_offset"):
+                    input_batch.position_offset = 0
+                model_output, num_additional_tokens = self.model(
+                    input_ids=input_ids,
+                    positions=positions + input_batch.position_offset,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    all_token_ids=token_ids,
+                )
+                input_batch.position_offset += num_additional_tokens
+            else:
+                # print("NOT PASSING TOKEN_IDS TO MODEL")
+                # print(self.model)
+                # print("hasattr(self.model, 'handles_full_sequence'):", hasattr(self.model, "handles_full_sequence"))
+                model_output = self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                )
 
             self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = (
