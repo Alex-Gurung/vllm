@@ -23,7 +23,7 @@
 # limitations under the License.
 """Inference-only Qwen3 model compatible with HuggingFace weights."""
 from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 import torch
 from torch import nn
@@ -282,6 +282,39 @@ ALL_DECODER_LAYER_TYPES = {
     "attention": Qwen3DecoderLayer,
 }
 
+def check_if_matches_special_sequence(
+    input_ids: torch.Tensor,
+    special_start_sequence: List[int],
+    special_end_sequence: List[int]
+) -> Optional[List[int]]:
+    input_list = input_ids.tolist()
+
+    len_end = len(special_end_sequence)
+    len_start = len(special_start_sequence)
+
+    # Minimum total length to contain start + end + gap (gap can be 0)
+    min_total_length = len_start + len_end
+    if len(input_list) < min_total_length:
+        return None
+
+    print(f"input_list: {input_list}")
+    print(f"special_end_sequence: {special_end_sequence}")
+    # Check if the sequence ends with the end sequence
+    if input_list[-len_end:].tolist() != special_end_sequence:
+        return None
+
+    # Search for the start sequence within the allowed gap (0 to 3 tokens)
+    for gap in range(0, 4):  # inclusive 0 to 3
+        start_idx = -(len_end + gap + len_start)
+        end_idx = -(len_end + gap) if (len_end + gap) != 0 else None
+        if input_list[start_idx:end_idx].tolist() == special_start_sequence:
+            # Return the tokens in the gap
+            gap_start = end_idx
+            gap_end = -len_end if len_end != 0 else None
+            gap_tokens = input_list[gap_start:gap_end]
+            return gap_tokens
+
+    return None
 
 @support_torch_compile(
     dynamic_arg_dims={
@@ -412,50 +445,69 @@ class Qwen3Model(Qwen2Model):
         # special_end_token = 151651
         # special_start_token = 151665
         # special_end_token = 151666
-        special_start_token = 151657
-        special_end_token = 151658
+        # special_start_token = 151657
+        # special_end_token = 151658
+        special_start_sequence = [27, 30940, 5854, 2450, 29]
+        special_end_sequence = [522, 30940, 5854, 2450, 29]
         do_reasoning = False
         num_reasoning_steps = 0
         if inputs_embeds is None and all_token_ids is not None:
             # print(f"all_token_ids: {all_token_ids[-10:]}")
             # print(f"input_ids shape: {input_ids.shape}")
-            is_special_end_token = (input_ids == special_end_token).sum()
+            is_special_end_token = (input_ids == special_end_sequence[-1]).sum()
             # print(f"input_ids: {input_ids}")
             # print(f"is_special_end_token: {is_special_end_token}")
             
-            if input_ids.shape[0] == 1 and (input_ids == special_end_token).sum() == 1:
-                # print(f"Found {special_end_token} in input_ids! should search backwards inside all_token_ids")
-                # search backwards to find the first 151651
-                # in theory only the last token is 151666
-                # search backwards to find the first 151650
-                end = all_token_ids.shape[0] - 1
-                start = None
-                for i in range(end, -1, -1):
-                    if all_token_ids[i] == special_start_token:
-                        # print(f"Found {special_start_token} at position {i}")
-                        start = i
-                        break
-                    if end - i > 3:
-                        break
-                if start is None:
-                    # print(f"No {special_start_token} found, skipping")
-                    pass
-                else:
-                    # now decode what's in between 
-                    # print(f"Decoding from {start} to {end}")
+            if input_ids.shape[0] == 1 and is_special_end_token == 1:
+                match = check_if_matches_special_sequence(input_ids, special_start_sequence, special_end_sequence)
+                if match is not None:
                     # decode the tokens in between
-                    tokens = all_token_ids[start+1:end]
-                    # print(f"Tokens: {tokens}")
+                    tokens = all_token_ids[match[0]+1:match[1]]
                     decoded_tokens = tokenizer.decode(tokens)
                     # print(f"Decoded Tokens: {decoded_tokens}")
                     # decoded tokens should be a number
                     try:
                         num_reasoning_steps = int(decoded_tokens)
-                        # print(f"Number of steps: {num_reasoning_steps}")
                         do_reasoning = True
                     except ValueError:
                         pass
                         # print(f"Decoded tokens are not a number: {decoded_tokens}")
+                else:
+                    pass
+
+                
+                # # print(f"Found {special_end_token} in input_ids! should search backwards inside all_token_ids")
+                # # search backwards to find the first 151651
+                # # in theory only the last token is 151666
+                # # search backwards to find the first 151650
+                # end = all_token_ids.shape[0] - 1
+                # start = None
+                # for i in range(end, -1, -1):
+                #     if all_token_ids[i] == special_start_token:
+                #         # print(f"Found {special_start_token} at position {i}")
+                #         start = i
+                #         break
+                #     if end - i > 3:
+                #         break
+                # if start is None:
+                #     # print(f"No {special_start_token} found, skipping")
+                #     pass
+                # else:
+                #     # now decode what's in between 
+                #     # print(f"Decoding from {start} to {end}")
+                #     # decode the tokens in between
+                #     tokens = all_token_ids[start+1:end]
+                #     # print(f"Tokens: {tokens}")
+                #     decoded_tokens = tokenizer.decode(tokens)
+                #     # print(f"Decoded Tokens: {decoded_tokens}")
+                #     # decoded tokens should be a number
+                #     try:
+                #         num_reasoning_steps = int(decoded_tokens)
+                #         # print(f"Number of steps: {num_reasoning_steps}")
+                #         do_reasoning = True
+                #     except ValueError:
+                #         pass
+                #         # print(f"Decoded tokens are not a number: {decoded_tokens}")
 
         if not do_reasoning:
             outputs = self.normal_forward(input_ids, 
