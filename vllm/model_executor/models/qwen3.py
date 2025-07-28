@@ -53,8 +53,6 @@ from transformers import AutoTokenizer
 from vllm.forward_context import ForwardContext, get_forward_context, set_forward_context
 import copy
 
-tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
-
 
 logger = init_logger(__name__)
 
@@ -284,36 +282,54 @@ ALL_DECODER_LAYER_TYPES = {
 
 def check_if_matches_special_sequence(
     input_ids: torch.Tensor,
-    special_start_sequence: List[int],
-    special_end_sequence: List[int]
+    special_start_sequences: List[List[int]],
+    special_end_sequences: List[List[int]],
+    tokenizer: AutoTokenizer,
 ) -> Optional[List[int]]:
     input_list = input_ids.tolist()
+    # print(f"input_list: {input_list}")
+    # print(f"special_start_sequence: {special_start_sequence}")
+    # print(f"special_end_sequence: {special_end_sequence}")
 
-    len_end = len(special_end_sequence)
-    len_start = len(special_start_sequence)
+    len_end = len(special_end_sequences[0])
+    len_start = len(special_start_sequences[0])
 
     # Minimum total length to contain start + end + gap (gap can be 0)
     min_total_length = len_start + len_end
     if len(input_list) < min_total_length:
+        # print(f"input_list is too short")
         return None
 
-    print(f"input_list: {input_list}")
-    print(f"special_end_sequence: {special_end_sequence}")
+    # print(f"input_list: {input_list[-20:]}")
+    # print(f"decoded: {TOKENIZER.decode(input_list[-20:])}")
+    # print(f"special_end_sequence: {special_end_sequence}")
+
     # Check if the sequence ends with the end sequence
-    if input_list[-len_end:].tolist() != special_end_sequence:
+    if input_list[-len_end:] not in special_end_sequences:
+        # print(f"input_list does not end with special_end_sequence: {input_list[-len_end:]} != {special_end_sequence}")
         return None
+
+    # print("MATCHES END")
+    # print(f"input_list: {input_list[-20:]}")
+    # print(f"decoded: {tokenizer.decode(input_list[-20:])}")
+    # print(f"special_end_sequences: {special_end_sequences}")
 
     # Search for the start sequence within the allowed gap (0 to 3 tokens)
     for gap in range(0, 4):  # inclusive 0 to 3
         start_idx = -(len_end + gap + len_start)
         end_idx = -(len_end + gap) if (len_end + gap) != 0 else None
-        if input_list[start_idx:end_idx].tolist() == special_start_sequence:
+        substring = input_list[start_idx:end_idx]
+        # print(f"decoded substring: {tokenizer.decode(substring)}")
+        # print(f"substring: {substring}")
+        # print(f"special_start_sequences: {special_start_sequences}")
+        if substring in special_start_sequences:
             # Return the tokens in the gap
             gap_start = end_idx
             gap_end = -len_end if len_end != 0 else None
             gap_tokens = input_list[gap_start:gap_end]
+            # print("FOUND")
             return gap_tokens
-
+    # print("NO MATCH")
     return None
 
 @support_torch_compile(
@@ -342,6 +358,7 @@ class Qwen3Model(Qwen2Model):
             quant_config, 
             prefix="reasoning_projector",
             vocab_projection=self.vocab_projection)
+        self.tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
 
     def normal_forward(self, input_ids: torch.Tensor,
         positions: torch.Tensor,
@@ -447,23 +464,36 @@ class Qwen3Model(Qwen2Model):
         # special_end_token = 151666
         # special_start_token = 151657
         # special_end_token = 151658
-        special_start_sequence = [27, 30940, 5854, 2450, 29]
-        special_end_sequence = [522, 30940, 5854, 2450, 29]
+        # special_start_sequences = [
+        #     [27, 30940, 5854, 2450, 29], # <implicit_thought>
+        #     [366, 30940, 5854, 2450, 29], # " <implicit_thought>"
+        # ]
+        # special_end_sequence = [522, 30940, 5854, 2450, 29]
+        special_start_sequences = [
+            [27, 30940, 5854, 2450, 29],  # <implicit_thought>
+            [366, 30940, 5854, 2450, 29],  # " <implicit_thought>"
+        ]
+        special_end_sequences = [
+            [522, 30940, 5854, 2450, 29],
+            [522, 30940, 5854, 2450, 397],
+        ]
         do_reasoning = False
         num_reasoning_steps = 0
         if inputs_embeds is None and all_token_ids is not None:
             # print(f"all_token_ids: {all_token_ids[-10:]}")
             # print(f"input_ids shape: {input_ids.shape}")
-            is_special_end_token = (input_ids == special_end_sequence[-1]).sum()
+            is_special_end_token = (input_ids in [s[-1] for s in special_end_sequences]).sum()
             # print(f"input_ids: {input_ids}")
             # print(f"is_special_end_token: {is_special_end_token}")
             
             if input_ids.shape[0] == 1 and is_special_end_token == 1:
-                match = check_if_matches_special_sequence(input_ids, special_start_sequence, special_end_sequence)
+                match = check_if_matches_special_sequence(all_token_ids, 
+                    special_start_sequences, special_end_sequences, self.tokenizer)
                 if match is not None:
                     # decode the tokens in between
-                    tokens = all_token_ids[match[0]+1:match[1]]
-                    decoded_tokens = tokenizer.decode(tokens)
+                    # tokens = all_token_ids[match[0]+1:match[1]]
+                    # decoded_tokens = self.tokenizer.decode(tokens)
+                    decoded_tokens = self.tokenizer.decode(match)
                     # print(f"Decoded Tokens: {decoded_tokens}")
                     # decoded tokens should be a number
                     try:
