@@ -32,7 +32,8 @@ class TopKTopPSampler(nn.Module):
         if current_platform.is_cuda():
             if is_flashinfer_available:
                 flashinfer_version = flashinfer.__version__
-                if flashinfer_version < "0.2.3":
+                from packaging.version import Version
+                if Version(flashinfer_version) < Version("0.2.3"):
                     logger.warning(
                         "FlashInfer version >= 0.2.3 required. "
                         "Falling back to default sampling implementation.")

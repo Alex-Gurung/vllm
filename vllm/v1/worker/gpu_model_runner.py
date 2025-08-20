@@ -445,6 +445,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                reasoning_active=False,
+                reasoning_remaining=0,
+                last_hidden=None,   # [1, H] on PP last rank
+                next_embed_pp0=None  # [1, H] on PP rank 0 for next step
             )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -654,8 +658,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         req_ids = self.input_batch.req_ids
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
-        max_num_scheduled_tokens = max(tokens)
-
+        max_num_scheduled_tokens = max(num_scheduled_tokens)
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
         req_indices = np.repeat(self.arange_np[:num_reqs],
@@ -701,9 +704,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.query_start_loc_np[0] = 0
         self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
 
+        # Debug: Log sequence length computation
+        # print(f"=== PREPARE_INPUTS SEQ_LENS DEBUG ===")
+        # print(f"num_reqs: {num_reqs}")
+        # print(f"num_computed_tokens_cpu[:num_reqs]: {self.input_batch.num_computed_tokens_cpu[:num_reqs]}")
+        # print(f"num_scheduled_tokens (after reasoning extension): {num_scheduled_tokens}")
+        
         self.seq_lens_np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
+            
+        # print(f"computed seq_lens_np[:num_reqs] (includes reasoning space): {self.seq_lens_np[:num_reqs]}")
+        # print(f"=== END PREPARE_INPUTS SEQ_LENS DEBUG ===")
 
         # Copy the tensors to the GPU.
         self.input_ids[:total_num_scheduled_tokens].copy_(
@@ -764,6 +776,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # graph mode.
             blk_table.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
 
+            # Debug: Log CommonAttentionMetadata creation
+            # print(f"=== COMMON ATTENTION METADATA DEBUG ===")
+            # print(f"seq_lens[:num_reqs]: {self.seq_lens[:num_reqs]}")
+            # print(f"seq_lens_cpu[:num_reqs]: {self.seq_lens_cpu[:num_reqs]}")
+            # print(f"max value in seq_lens_cpu: {self.seq_lens_cpu[:num_reqs].max()}")
+            # print(f"=== END COMMON ATTENTION METADATA DEBUG ===")
+            
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=self.query_start_loc[:num_reqs + 1],
                 query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
@@ -1408,6 +1427,42 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
          spec_decode_metadata, num_scheduled_tokens_np,
          spec_decode_common_attn_metadata) = (
              self._prepare_inputs(scheduler_output))
+
+        ###################################
+        # Start handle req embeds
+        ###################################
+        num_reqs = self.input_batch.num_reqs
+        # print(f"NUM REQS: {num_reqs}")
+        step_inputs_embeds_override = [None] * num_reqs   # only filled for requests we override
+        step_skip_sampling = np.zeros(num_reqs, dtype=bool)
+        # per_req_histories is the token history for each request, used to match special end sequences
+        per_req_histories: list[torch.Tensor] = []
+        # Map durable per-request state to this step's batch order.
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            cur_len_i = int(self.seq_lens_cpu[i].item())
+            if cur_len_i == 0:
+                # empty history (rare, but keep types consistent)
+                per_req_histories.append(torch.empty(0, dtype=torch.int32, device="cpu"))
+            else:
+                # NOTE: keep on CPU so model-side .tolist()/tokenizer.decode won’t
+                # synchronize CUDA or allocate on GPU.
+                per_req_histories.append(
+                    self.input_batch.token_ids_cpu[i, :cur_len_i]
+                )
+
+            req = self.requests[req_id]
+            if not req.reasoning_active:
+                continue
+            if req.next_embed_pp0 is not None:
+                step_inputs_embeds_override[i] = req.next_embed_pp0  # [1, H] on device
+                step_skip_sampling[i] = True
+                # We will consume it this step:
+                req.next_embed_pp0 = None
+        any_override = any(e is not None for e in step_inputs_embeds_override)
+        ###################################
+        # End handle req embeds
+        ###################################
+        
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -1456,6 +1511,34 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
             input_ids = None
+        elif any_override and get_pp_group().is_first_rank:
+            ###################################
+            # Start handle req embeds
+            ###################################
+            # Text-only but we need to plant custom embeds this step
+            # input_ids = self.input_ids[:num_scheduled_tokens]            # int32 flat
+            # base_embeds = self.model.get_input_embeddings(input_ids)     # [T, H]
+            ids_for_embed = self.input_ids[:num_input_tokens]                # [num_input_tokens]
+            base_embeds = self.model.get_input_embeddings(ids_for_embed)     # [num_input_tokens, H]
+
+            # Overwrite the LAST token row for any request that has an override.
+            qsl = self.query_start_loc[:num_reqs + 1]                         # request -> flat row starts
+            for i, e in enumerate(step_inputs_embeds_override):
+                if e is None:
+                    continue
+                last_idx = int(qsl[i + 1].item() - 1)                         # last real row for req i
+                base_embeds[last_idx].copy_(
+                    e.squeeze(0).to(base_embeds.device).to(base_embeds.dtype)
+                )
+
+            # Stage into the persistent buffer used by the graph
+            self.inputs_embeds[:num_input_tokens].copy_(base_embeds)
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            input_ids = None
+            model_kwargs = {}
+            ###################################
+            # End handle req embeds
+            ###################################
         else:
             # For text-only models, we use token ids as input.
             # While it is possible to use embeddings as input just like the
@@ -1495,33 +1578,57 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # only support batch size of 1 for now
             # input_batch.token_ids_cpu has shape (batch_size, max_model_len)
             num_tokens = self.seq_lens_cpu[0]
-            token_ids = input_batch.token_ids_cpu[0, :num_tokens]
             
-            # print(f"token_ids: {token_ids}")
-            # print(f"token_ids shape: {token_ids.shape}")
-            # print(f"token_ids dtype: {token_ids.dtype}")
-            # print(f"token_ids device: {token_ids.device}")
-            # print(self.model)
+            # print(f"model has handles_full_sequence: {hasattr(self.model, 'handles_full_sequence')}")
+            # print(f"model handles_full_sequence: {self.model.handles_full_sequence if hasattr(self.model, 'handles_full_sequence') else 'not found'}")
             if hasattr(self.model, "handles_full_sequence") and self.model.handles_full_sequence:
-                # print("PASSING TOKEN_IDS TO MODEL")
-                if not hasattr(input_batch, "position_offset"):
-                    input_batch.position_offset = 0
-                model_output, num_additional_tokens = self.model(
+                reasoning_mask = torch.tensor(
+                    [e is not None for e in step_inputs_embeds_override], 
+                    device=self.device, dtype=torch.bool)
+                # forward_with_reasoning is a method in the model that handles the reasoning logic
+                model_output, num_additional_tokens, new_embeds = self.model.forward_with_reasoning(
                     input_ids=input_ids,
-                    positions=positions + input_batch.position_offset,
+                    positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
-                    all_token_ids=token_ids,
+                    # all_token_ids=token_ids,
+                    all_token_ids=per_req_histories,
+                    reasoning_mask=reasoning_mask,
                     **MultiModalKwargs.as_kwargs(
                         model_kwargs,
                         device=self.device,
                     ),
                 )
-                input_batch.position_offset += num_additional_tokens
+                # num_additional_tokens is a list of ints, one for each request
+                # num_additional_tokens[i] is the number of additional tokens
+                if new_embeds is not None:
+                    for i, req_id in enumerate(self.input_batch.req_ids):
+                        # Map request i -> correct token-row using logits_indices.
+                        row = int(logits_indices[i])
+                        # print(f"row: {row} vs req id: {req_id}; vs i: {i}")
+                        e = new_embeds[row]
+                        if e is None:
+                            continue
+
+                        # mask out based on reasoning_mask and num_additional_tokens (both must be false to skip)
+                        if not reasoning_mask[i] and num_additional_tokens[i] == 0:
+                            # print(f"SKIPPING REQ ID: {req_id} because reasoning_mask is false and num_additional_tokens is 0")
+                            continue
+
+                        # ensure shape/device
+                        if e.dim() == 1:
+                            e = e.unsqueeze(0)
+                        e = e.detach().to(self.device)
+                        self.requests[req_id].next_embed_pp0 = e
+
+                        # if the model said it ran N internal reasoning steps,
+                        # keep skipping sampling for that many steps
+                        if num_additional_tokens is not None and num_additional_tokens[i] > 0:
+                            step_skip_sampling[i] = True
+                            rs = self.requests[req_id]
+                            rs.reasoning_remaining = int(num_additional_tokens[i])
+                            rs.reasoning_active = True
             else:
-                # print("NOT PASSING TOKEN_IDS TO MODEL")
-                # print(self.model)
-                # print("hasattr(self.model, 'handles_full_sequence'):", hasattr(self.model, "handles_full_sequence"))
                 model_output = self.model(
                     input_ids=input_ids,
                     positions=positions,
@@ -1664,6 +1771,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
+        
+        new_valid_sampled_token_ids = []
+        for i, sampled_ids in enumerate(valid_sampled_token_ids):
+            if not sampled_ids:
+                new_valid_sampled_token_ids.append(sampled_ids)
+                continue
+            req_id = self.input_batch.req_ids[i]
+            req_state = self.requests[req_id]
+            # if req_state.reasoning_active:
+            if step_skip_sampling[i]:
+                # new_ids = [1294] * len(sampled_ids)
+                new_ids = [1294]
+                # print(f"adding new ids: {new_ids}")
+                # print(f"sampled_ids: {sampled_ids}")
+                # print(f"new_ids: {new_ids}")
+                sampled_ids = new_ids
+                # x = 1/0
+            # else:
+            #     x = 2/0
+            new_valid_sampled_token_ids.append(sampled_ids)
+        valid_sampled_token_ids = new_valid_sampled_token_ids
+
 
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
@@ -1673,6 +1802,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for req_idx, sampled_ids in enumerate(valid_sampled_token_ids):
             if not sampled_ids:
                 continue
+            req_id = self.input_batch.req_ids[req_idx]
+            req_state = self.requests[req_id]
+            # print(f"step_skip_sampling[req_idx]: {step_skip_sampling[req_idx]}")
+            if step_skip_sampling[req_idx]:
+                req_state.reasoning_remaining -= 1
+                req_state.reasoning_active = req_state.reasoning_remaining > 0
+                
+                # print(f"UPDATING REQ STATE FOR REQ ID: {req_id}; REASONING REMAINING: {req_state.reasoning_remaining}; REASONING ACTIVE: {req_state.reasoning_active}")
+                # print(f"req_state.reasoning_remaining: {req_state.reasoning_remaining}")
+                # print(f"req_state.reasoning_active: {req_state.reasoning_active}")
+                # continue
+                # print(f"original sampled_ids: {sampled_ids}")
+                # sampled_ids = [322] * len(sampled_ids)
+                # print(f"new sampled_ids: {sampled_ids}")
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
             end_idx = start_idx + len(sampled_ids)
@@ -2972,3 +3115,4 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             common_prefix_len=0,  # No cascade for encoder
             common_attn_metadata=common_metadata,
         )
+
