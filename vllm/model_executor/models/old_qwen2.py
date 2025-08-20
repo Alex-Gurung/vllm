@@ -56,8 +56,6 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
-from transformers import AutoTokenizer
-from typing import List, Optional
 
 class Qwen2MLP(nn.Module):
 
@@ -133,7 +131,6 @@ class Qwen2Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
-        dual_chunk_attention_config = None
         self.dual_chunk_attention_config = dual_chunk_attention_config
 
         self.qkv_proj = QKVParallelLinear(
@@ -265,59 +262,6 @@ class Qwen2DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-def check_if_matches_special_sequence(
-    input_ids: torch.Tensor,
-    special_start_sequences: List[List[int]],
-    special_end_sequences: List[List[int]],
-    tokenizer: AutoTokenizer,
-) -> Optional[List[int]]:
-    input_list = input_ids.tolist()
-    # print(f"input_list: {input_list}")
-    # print(f"special_start_sequence: {special_start_sequence}")
-    # print(f"special_end_sequence: {special_end_sequence}")
-
-    len_end = len(special_end_sequences[0])
-    len_start = len(special_start_sequences[0])
-
-    # Minimum total length to contain start + end + gap (gap can be 0)
-    min_total_length = len_start + len_end
-    if len(input_list) < min_total_length:
-        # print(f"input_list is too short")
-        return None
-
-    # print(f"input_list: {input_list[-20:]}")
-    # print(f"decoded: {TOKENIZER.decode(input_list[-20:])}")
-    # print(f"special_end_sequence: {special_end_sequence}")
-
-    # Check if the sequence ends with the end sequence
-    if input_list[-len_end:] not in special_end_sequences:
-        # print(f"input_list does not end with special_end_sequence: {input_list[-len_end:]} != {special_end_sequence}")
-        return None
-
-    # print("MATCHES END")
-    # print(f"input_list: {input_list[-20:]}")
-    # print(f"decoded: {tokenizer.decode(input_list[-20:])}")
-    # print(f"special_end_sequences: {special_end_sequences}")
-
-    # Search for the start sequence within the allowed gap (0 to 3 tokens)
-    for gap in range(0, 4):  # inclusive 0 to 3
-        start_idx = -(len_end + gap + len_start)
-        end_idx = -(len_end + gap) if (len_end + gap) != 0 else None
-        substring = input_list[start_idx:end_idx]
-        # print(f"decoded substring: {tokenizer.decode(substring)}")
-        # print(f"substring: {substring}")
-        # print(f"special_start_sequences: {special_start_sequences}")
-        if substring in special_start_sequences:
-            # Return the tokens in the gap
-            gap_start = end_idx
-            gap_end = -len_end if len_end != 0 else None
-            gap_tokens = input_list[gap_start:gap_end]
-            # print("FOUND")
-            return gap_tokens
-    # print("NO MATCH")
-    return None
-
-
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -328,8 +272,6 @@ def check_if_matches_special_sequence(
         "inputs_embeds": 0,
     })
 class Qwen2Model(nn.Module):
-
-    handles_full_sequence = True
 
     def __init__(self,
                  *,
@@ -388,31 +330,10 @@ class Qwen2Model(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        # self.reasoning_projector = Qwen2MLP(
-        #     hidden_size=config.hidden_size,
-        #     intermediate_size=config.intermediate_size,
-        #     hidden_act=config.hidden_act,
-        #     quant_config=quant_config,
-        #     prefix="reasoning_projector",
-        # )
-
-        self.NUM_REASONING_LAYERS = 3
-        self.reasoning_projector = nn.Sequential(
-            *[Qwen2MLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                prefix="reasoning_projector",
-            ) for layer_idx in range(self.NUM_REASONING_LAYERS)]
-        )
-
-        self.tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct-1M")
-
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
-    def normal_forward(
+    def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
@@ -456,8 +377,6 @@ class Qwen2Model(nn.Module):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            # if "reasoning_projector" in name:
-            #     print(f"Loading (looking for reasoning_projector) weight: {name}, shape: {loaded_weight.shape}, stats: min={loaded_weight.min():.4f}, max={loaded_weight.max():.4f}")
             if "rotary_emb.inv_freq" in name:
                 continue
             if (self.quant_config is not None and
@@ -468,7 +387,6 @@ class Qwen2Model(nn.Module):
                                         default_weight_loader)
                 loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
                                  loaded_weight[0])
-                # print(f"Loading weight: {name}, shape: {loaded_weight.shape}, stats: min={loaded_weight.min():.4f}, max={loaded_weight.max():.4f}")
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
@@ -481,13 +399,8 @@ class Qwen2Model(nn.Module):
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
-                # print(f"Loading weight: {name}, shape: {loaded_weight.shape}, stats: min={loaded_weight.min():.4f}, max={loaded_weight.max():.4f}")
-                # print(f"param_name: {param_name}")
-                # print(f"weight_name: {weight_name}")
-                
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                # print(f"Loading weight: {name}, shape: {loaded_weight.shape}, stats: min={loaded_weight.min():.4f}, max={loaded_weight.max():.4f}")
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
@@ -501,189 +414,11 @@ class Qwen2Model(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                # print(f"Loading weight: {name}, shape: {loaded_weight.shape}, stats: min={loaded_weight.min():.4f}, max={loaded_weight.max():.4f}")
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
-
-    def reasoning_forward(self, 
-        num_reasoning_steps: int,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        """
-        Simple fix: Just accept that we can't preserve perfect KV cache continuity during reasoning.
-        The key insight is that the FINAL forward pass should use the correct position that accounts
-        for all reasoning steps, so the next real token will have the right attention context.
-        """
-        # print(f"=== REASONING FORWARD DEBUG ===")
-        # print(f"num_reasoning_steps: {num_reasoning_steps}")
-        # print(f"input_ids: {input_ids}")
-        # print(f"Original positions: {positions}")
-        
-        if inputs_embeds is None:
-            inputs_embeds = self.get_input_embeddings(input_ids)
-            # print(f"Created inputs_embeds from input_ids, shape: {inputs_embeds.shape}")
-        
-        # Run reasoning steps iteratively as before, but track the "logical" position
-        # For intermediate reasoning steps, we don't care about perfect KV cache
-        # We just need the output to feed to the next step
-        outputs = self.normal_forward(input_ids, 
-                    positions, 
-                    intermediate_tensors, 
-                    inputs_embeds)
-        embeds = self.reasoning_projector(outputs)
-        
-        return outputs, embeds
-
-    def forward_with_reasoning(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        all_token_ids: Optional[torch.Tensor] = None,
-        reasoning_mask: Optional[torch.Tensor] = None,
-    # ) -> Union[torch.Tensor, IntermediateTensors]:
-    ) -> Union[tuple[Union[torch.Tensor, IntermediateTensors], int], Union[torch.Tensor, IntermediateTensors]]:
-        # print(f"=== MODEL FORWARD ENTRY ===")
-        
-        # print(f"input_ids shape: {input_ids.shape}")
-        # print(f"all_token_ids shape: {[t.shape for t in all_token_ids] if all_token_ids is not None else 'None'}")
-        # print(f"inputs_embeds shape: {inputs_embeds.shape if inputs_embeds is not None else 'None'}")
-
-        # print(f"input_ids: {input_ids}")
-        # if all_token_ids is not None:
-        #     print(f"all_token_ids length: {len(all_token_ids)}")
-        #     print(f"all_token_ids last 10: {all_token_ids[-10:].tolist()}")
-        # else:
-        #     print(f"all_token_ids: None")
-        # print(f"positions: {positions}")
-        # print(f"positions values: {positions.tolist() if positions.numel() < 10 else positions[:10].tolist()}")
-        # print(f"intermediate_tensors: {intermediate_tensors}")
-        # special_end_sequence = [522, 30940, 5854, 2450, 29]
-        special_start_sequences = [
-            [27, 30940, 5854, 2450, 29],  # <implicit_thought>
-            [366, 30940, 5854, 2450, 29],  # " <implicit_thought>"
-            [15757, 30940, 5854, 2450, 29],
-            [1784, 30940, 5854, 2450, 29],
-            [22476, 30940, 5854, 2450, 29]
-        ]
-        special_end_sequences = [
-            [522, 30940, 5854, 2450, 29],
-            [522, 30940, 5854, 2450, 397],
-            [522, 30940, 5854, 2450, 1339],
-            [522, 30940, 5854, 2450, 10370],
-            [522, 30940, 5854, 2450, 14276],
-            [522, 30940, 5854, 2450, 1472],
-            [522, 30940, 5854, 2450, 9877],
-        ]
-        end_of_special_end_sequences = [s[-1] for s in special_end_sequences]
-
-        size_input = input_ids.shape[0] if input_ids is not None else inputs_embeds.shape[0]
-        do_reasoning = [False] * size_input
-        num_reasoning_steps = [0 for _ in range(size_input)]
-        if inputs_embeds is None and all_token_ids is not None:
-            # print(f"all_token_ids: {all_token_ids[-10:]}")
-            # print(f"input_ids shape: {input_ids.shape}")
-            # is_special_end_token = (input_ids in [s[-1] for s in special_end_sequences]).sum()
-            is_special_end_token = [input_ids[i] in end_of_special_end_sequences for i in range(size_input)]
-            # print(f"checking input_ids: {input_ids}")
-            # print(f"input ids shape: {input_ids.shape}")
-            # print(f"end of special_end_sequences: {[s[-1] for s in special_end_sequences]}")
-            
-            # print(f"is_special_end_token: {is_special_end_token}")
-            # print(f"len(is_special_end_token): {len(is_special_end_token)}")
-            # print(f"len(all_token_ids): {len(all_token_ids)}")
-            
-            # if input_ids.shape[0] == 1 and is_special_end_token:
-            # check that input ids and all_token_ids have the same shape
-            if size_input == len(all_token_ids):
-                for i in range(size_input):
-                    if is_special_end_token[i]:
-                        match = check_if_matches_special_sequence(all_token_ids[i], 
-                            special_start_sequences, special_end_sequences, self.tokenizer)
-                        # print(f"checking match: {match}")
-                        if match is not None:
-                            # decode the tokens in between
-                            # tokens = all_token_ids[match[0]+1:match[1]]
-                            # decoded_tokens = self.tokenizer.decode(tokens)
-                            decoded_tokens = self.tokenizer.decode(match)
-                            # print(f"Decoded Tokens: {decoded_tokens}")
-                            # decoded tokens should be a number
-                            try:
-                                num_reasoning_steps[i] = int(decoded_tokens)
-                                # num_reasoning_steps = 2
-                                do_reasoning[i] = True
-                                # print(f"Number of reasoning steps: {num_reasoning_steps}")
-                            except ValueError:
-                                pass
-                                # print(f"Decoded tokens are not a number: {decoded_tokens}")
-            # else:
-            #     print(f"MAYBE AT THE BEGINNING? {input_ids.shape} {len(all_token_ids)}")
-        # print(f"do_reasoning: {do_reasoning}")
-        # print(f"reasoning mask: {reasoning_mask}")
-        if not any(do_reasoning):
-            # do_reasoning is based on the token ids, so we may
-            # still want to do reasoning based on the reasoning mask
-            # print(f"=== NORMAL FORWARD ===")
-            # print(f"input_ids: {input_ids}")
-            # print(f"positions: {positions}")
-            # print(f"intermediate_tensors: {intermediate_tensors}")
-            outputs = self.normal_forward(input_ids, 
-                    positions, 
-                    intermediate_tensors, 
-                    inputs_embeds)
-
-            if all_token_ids is not None:
-                # Only compute when at least one req is in a reasoning step
-                if reasoning_mask is not None and bool(torch.any(torch.as_tensor(reasoning_mask))):
-                    # outputs: [T, H]  ->  embeds: [T, H]  (row-aligned)
-                    embeds = self.reasoning_projector(outputs)
-                else:
-                    embeds = None
-                # print(f"OUTPUT EMBEDS SHAPE: {embeds.shape if embeds is not None else 'None'}")
-                return outputs, num_reasoning_steps, embeds
-            else:
-                return outputs
-
-        # do_reasoning is true
-
-        # doing reasoning for the next num_steps
-        # print(f"=== STARTING REASONING ===")
-        # print(f"doing reasoning for {num_reasoning_steps} steps")
-        outputs, embeds = self.reasoning_forward(num_reasoning_steps, 
-            input_ids, 
-            positions, 
-            intermediate_tensors, 
-            inputs_embeds)
-
-        # print(f"REASONING EMBEDS SHAPE: {embeds.shape if embeds is not None else 'None'}")
-
-        # print(f"=== REASONING COMPLETE ===")
-        # print(f"Final reasoning output shape: {outputs.shape}")
-        # print(f"Final reasoning output stats: min={outputs.min():.4f}, max={outputs.max():.4f}, mean={outputs.mean():.4f}")
-
-        if all_token_ids is not None:
-            return outputs, num_reasoning_steps, embeds
-        else:
-            return outputs
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        all_token_ids: Optional[torch.Tensor] = None,
-        reasoning_mask: Optional[torch.Tensor] = None,
-    # ) -> Union[torch.Tensor, IntermediateTensors]:
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        return self.normal_forward(input_ids, positions, intermediate_tensors, inputs_embeds)
 
 
 class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
@@ -698,7 +433,6 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             "up_proj",
         ],
     }
-    handles_full_sequence = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -733,33 +467,15 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
-    def forward_with_reasoning(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        all_token_ids: Optional[torch.Tensor] = None,
-        reasoning_mask: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        # print(f"all_token_ids: {all_token_ids}")
-        return self.model.forward_with_reasoning(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds, all_token_ids=all_token_ids,
-                                   reasoning_mask=reasoning_mask)
-    
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-        all_token_ids: Optional[torch.Tensor] = None,
-        reasoning_mask: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # print(f"all_token_ids: {all_token_ids}")
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds, all_token_ids=all_token_ids,
-                                   reasoning_mask=reasoning_mask)
+                                   inputs_embeds)
         return hidden_states
 
     def compute_logits(

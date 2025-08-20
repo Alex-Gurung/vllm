@@ -44,6 +44,11 @@ class CachedRequestState:
 
     lora_request: Optional[LoRARequest] = None
 
+    reasoning_active: bool = False
+    reasoning_remaining: int = 0
+    last_hidden: Optional[torch.Tensor] = None   # [1, H] on PP last rank
+    next_embed_pp0: Optional[torch.Tensor] = None  # [1, H] on PP rank 0 for next step
+
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
 
@@ -239,6 +244,8 @@ class InputBatch:
         self.sampling_metadata = self._make_sampling_metadata()
 
         self.pooling_params: dict[str, PoolingParams] = {}
+
+        
 
     @property
     def req_ids(self) -> list[str]:

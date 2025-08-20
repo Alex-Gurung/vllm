@@ -551,11 +551,6 @@ class Qwen2Model(nn.Module):
     # ) -> Union[torch.Tensor, IntermediateTensors]:
     ) -> Union[tuple[Union[torch.Tensor, IntermediateTensors], int], Union[torch.Tensor, IntermediateTensors]]:
         # print(f"=== MODEL FORWARD ENTRY ===")
-        
-        # print(f"input_ids shape: {input_ids.shape}")
-        # print(f"all_token_ids shape: {[t.shape for t in all_token_ids] if all_token_ids is not None else 'None'}")
-        # print(f"inputs_embeds shape: {inputs_embeds.shape if inputs_embeds is not None else 'None'}")
-
         # print(f"input_ids: {input_ids}")
         # if all_token_ids is not None:
         #     print(f"all_token_ids length: {len(all_token_ids)}")
@@ -582,54 +577,40 @@ class Qwen2Model(nn.Module):
             [522, 30940, 5854, 2450, 1472],
             [522, 30940, 5854, 2450, 9877],
         ]
-        end_of_special_end_sequences = [s[-1] for s in special_end_sequences]
 
-        size_input = input_ids.shape[0] if input_ids is not None else inputs_embeds.shape[0]
-        do_reasoning = [False] * size_input
-        num_reasoning_steps = [0 for _ in range(size_input)]
+        do_reasoning = False
+        num_reasoning_steps = 0
         if inputs_embeds is None and all_token_ids is not None:
             # print(f"all_token_ids: {all_token_ids[-10:]}")
             # print(f"input_ids shape: {input_ids.shape}")
             # is_special_end_token = (input_ids in [s[-1] for s in special_end_sequences]).sum()
-            is_special_end_token = [input_ids[i] in end_of_special_end_sequences for i in range(size_input)]
+            is_special_end_token = input_ids[-1] in [s[-1] for s in special_end_sequences]
             # print(f"checking input_ids: {input_ids}")
-            # print(f"input ids shape: {input_ids.shape}")
             # print(f"end of special_end_sequences: {[s[-1] for s in special_end_sequences]}")
-            
             # print(f"is_special_end_token: {is_special_end_token}")
-            # print(f"len(is_special_end_token): {len(is_special_end_token)}")
-            # print(f"len(all_token_ids): {len(all_token_ids)}")
             
-            # if input_ids.shape[0] == 1 and is_special_end_token:
-            # check that input ids and all_token_ids have the same shape
-            if size_input == len(all_token_ids):
-                for i in range(size_input):
-                    if is_special_end_token[i]:
-                        match = check_if_matches_special_sequence(all_token_ids[i], 
-                            special_start_sequences, special_end_sequences, self.tokenizer)
-                        # print(f"checking match: {match}")
-                        if match is not None:
-                            # decode the tokens in between
-                            # tokens = all_token_ids[match[0]+1:match[1]]
-                            # decoded_tokens = self.tokenizer.decode(tokens)
-                            decoded_tokens = self.tokenizer.decode(match)
-                            # print(f"Decoded Tokens: {decoded_tokens}")
-                            # decoded tokens should be a number
-                            try:
-                                num_reasoning_steps[i] = int(decoded_tokens)
-                                # num_reasoning_steps = 2
-                                do_reasoning[i] = True
-                                # print(f"Number of reasoning steps: {num_reasoning_steps}")
-                            except ValueError:
-                                pass
-                                # print(f"Decoded tokens are not a number: {decoded_tokens}")
-            # else:
-            #     print(f"MAYBE AT THE BEGINNING? {input_ids.shape} {len(all_token_ids)}")
-        # print(f"do_reasoning: {do_reasoning}")
-        # print(f"reasoning mask: {reasoning_mask}")
-        if not any(do_reasoning):
-            # do_reasoning is based on the token ids, so we may
-            # still want to do reasoning based on the reasoning mask
+            if input_ids.shape[0] == 1 and is_special_end_token:
+                match = check_if_matches_special_sequence(all_token_ids, 
+                    special_start_sequences, special_end_sequences, self.tokenizer)
+                if match is not None:
+                    # decode the tokens in between
+                    # tokens = all_token_ids[match[0]+1:match[1]]
+                    # decoded_tokens = self.tokenizer.decode(tokens)
+                    decoded_tokens = self.tokenizer.decode(match)
+                    # print(f"Decoded Tokens: {decoded_tokens}")
+                    # decoded tokens should be a number
+                    try:
+                        num_reasoning_steps = int(decoded_tokens)
+                        # num_reasoning_steps = 2
+                        do_reasoning = True
+                        # print(f"Number of reasoning steps: {num_reasoning_steps}")
+                    except ValueError:
+                        pass
+                        # print(f"Decoded tokens are not a number: {decoded_tokens}")
+                else:
+                    pass
+
+        if not do_reasoning:
             # print(f"=== NORMAL FORWARD ===")
             # print(f"input_ids: {input_ids}")
             # print(f"positions: {positions}")
@@ -646,13 +627,9 @@ class Qwen2Model(nn.Module):
                     embeds = self.reasoning_projector(outputs)
                 else:
                     embeds = None
-                # print(f"OUTPUT EMBEDS SHAPE: {embeds.shape if embeds is not None else 'None'}")
-                return outputs, num_reasoning_steps, embeds
+                return outputs, 0, embeds
             else:
                 return outputs
-
-        # do_reasoning is true
-
         # doing reasoning for the next num_steps
         # print(f"=== STARTING REASONING ===")
         # print(f"doing reasoning for {num_reasoning_steps} steps")
@@ -661,9 +638,6 @@ class Qwen2Model(nn.Module):
             positions, 
             intermediate_tensors, 
             inputs_embeds)
-
-        # print(f"REASONING EMBEDS SHAPE: {embeds.shape if embeds is not None else 'None'}")
-
         # print(f"=== REASONING COMPLETE ===")
         # print(f"Final reasoning output shape: {outputs.shape}")
         # print(f"Final reasoning output stats: min={outputs.min():.4f}, max={outputs.max():.4f}, mean={outputs.mean():.4f}")
@@ -682,8 +656,103 @@ class Qwen2Model(nn.Module):
         all_token_ids: Optional[torch.Tensor] = None,
         reasoning_mask: Optional[torch.Tensor] = None,
     # ) -> Union[torch.Tensor, IntermediateTensors]:
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        return self.normal_forward(input_ids, positions, intermediate_tensors, inputs_embeds)
+    ) -> Union[tuple[Union[torch.Tensor, IntermediateTensors], int], Union[torch.Tensor, IntermediateTensors]]:
+        # print(f"=== MODEL FORWARD ENTRY ===")
+        # print(f"input_ids: {input_ids}")
+        # if all_token_ids is not None:
+        #     print(f"all_token_ids length: {len(all_token_ids)}")
+        #     print(f"all_token_ids last 10: {all_token_ids[-10:].tolist()}")
+        # else:
+        #     print(f"all_token_ids: None")
+        # print(f"positions: {positions}")
+        # print(f"positions values: {positions.tolist() if positions.numel() < 10 else positions[:10].tolist()}")
+        # print(f"intermediate_tensors: {intermediate_tensors}")
+        # special_end_sequence = [522, 30940, 5854, 2450, 29]
+        special_start_sequences = [
+            [27, 30940, 5854, 2450, 29],  # <implicit_thought>
+            [366, 30940, 5854, 2450, 29],  # " <implicit_thought>"
+            [15757, 30940, 5854, 2450, 29],
+            [1784, 30940, 5854, 2450, 29],
+            [22476, 30940, 5854, 2450, 29]
+        ]
+        special_end_sequences = [
+            [522, 30940, 5854, 2450, 29],
+            [522, 30940, 5854, 2450, 397],
+            [522, 30940, 5854, 2450, 1339],
+            [522, 30940, 5854, 2450, 10370],
+            [522, 30940, 5854, 2450, 14276],
+            [522, 30940, 5854, 2450, 1472],
+            [522, 30940, 5854, 2450, 9877],
+        ]
+
+        do_reasoning = False
+        num_reasoning_steps = 0
+        if inputs_embeds is None and all_token_ids is not None:
+            # print(f"all_token_ids: {all_token_ids[-10:]}")
+            # print(f"input_ids shape: {input_ids.shape}")
+            # is_special_end_token = (input_ids in [s[-1] for s in special_end_sequences]).sum()
+            is_special_end_token = input_ids[-1] in [s[-1] for s in special_end_sequences]
+            # print(f"checking input_ids: {input_ids}")
+            # print(f"end of special_end_sequences: {[s[-1] for s in special_end_sequences]}")
+            # print(f"is_special_end_token: {is_special_end_token}")
+            
+            if input_ids.shape[0] == 1 and is_special_end_token:
+                match = check_if_matches_special_sequence(all_token_ids, 
+                    special_start_sequences, special_end_sequences, self.tokenizer)
+                if match is not None:
+                    # decode the tokens in between
+                    # tokens = all_token_ids[match[0]+1:match[1]]
+                    # decoded_tokens = self.tokenizer.decode(tokens)
+                    decoded_tokens = self.tokenizer.decode(match)
+                    # print(f"Decoded Tokens: {decoded_tokens}")
+                    # decoded tokens should be a number
+                    try:
+                        num_reasoning_steps = int(decoded_tokens)
+                        # num_reasoning_steps = 2
+                        do_reasoning = True
+                        # print(f"Number of reasoning steps: {num_reasoning_steps}")
+                    except ValueError:
+                        pass
+                        # print(f"Decoded tokens are not a number: {decoded_tokens}")
+                else:
+                    pass
+
+        if not do_reasoning:
+            # print(f"=== NORMAL FORWARD ===")
+            # print(f"input_ids: {input_ids}")
+            # print(f"positions: {positions}")
+            # print(f"intermediate_tensors: {intermediate_tensors}")
+            outputs = self.normal_forward(input_ids, 
+                    positions, 
+                    intermediate_tensors, 
+                    inputs_embeds)
+
+            if all_token_ids is not None:
+                # Only compute when at least one req is in a reasoning step
+                if reasoning_mask is not None and bool(torch.any(torch.as_tensor(reasoning_mask))):
+                    # outputs: [T, H]  ->  embeds: [T, H]  (row-aligned)
+                    embeds = self.reasoning_projector(outputs)
+                else:
+                    embeds = None
+                return outputs, 0, embeds
+            else:
+                return outputs
+        # doing reasoning for the next num_steps
+        # print(f"=== STARTING REASONING ===")
+        # print(f"doing reasoning for {num_reasoning_steps} steps")
+        outputs, embeds = self.reasoning_forward(num_reasoning_steps, 
+            input_ids, 
+            positions, 
+            intermediate_tensors, 
+            inputs_embeds)
+        # print(f"=== REASONING COMPLETE ===")
+        # print(f"Final reasoning output shape: {outputs.shape}")
+        # print(f"Final reasoning output stats: min={outputs.min():.4f}, max={outputs.max():.4f}, mean={outputs.mean():.4f}")
+
+        if all_token_ids is not None:
+            return outputs, num_reasoning_steps, embeds
+        else:
+            return outputs
 
 
 class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
